@@ -38,3 +38,11 @@ env_logger = "0.11"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Windows/MSVC: the bundled libopus C build (audiopus_sys via cmake) links the
+# debug CRT (/MDd) under a debug profile, but rustc links the release CRT
+# (msvcrt) — yielding unresolved `_CrtDbgReportW` at link time. Building just the
+# sys crate optimized switches its cmake build to the release CRT (/MD), matching
+# rustc, so plain `cargo run` links. Our own crate stays unoptimized/debuggable.
+[profile.dev.package.audiopus_sys]
+opt-level = 3

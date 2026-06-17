@@ -1,0 +1,8 @@
+# Cargo build configuration. Build strategy lives in docs/DESIGN.md §8.
+
+[env]
+# cmake 4.x removed compatibility with `cmake_minimum_required(VERSION < 3.5)`,
+# which the bundled libopus shipped by `audiopus_sys` still declares. This is
+# cmake's supported shim for configuring such unmodified upstream projects, so the
+# Opus C build succeeds without patching the dependency. Harmless on older cmake.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
