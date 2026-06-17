@@ -67,8 +67,11 @@ silently substituted for a specified name — do not repeat that class of bug.)
   Never open one device for both. Never assume full-duplex on one device.
 - Virtual-device rule (Windows): one VB-Cable device is output-only, another is
   mic-only. Never open the same virtual device twice.
-- MVP is 48 kHz only, mono. Arbitrary sample rates and stereo are out of scope
-  for Phase 1.
+- MVP is 48 kHz only; the codec and UDP wire are always mono. A device stream may
+  be opened stereo when the device offers no mono config (e.g., VB-Cable), with vox
+  downmixing to mono before encode / upmixing after decode — the pipeline stays
+  mono (see DESIGN §4). Arbitrary sample rates and native stereo on the wire remain
+  out of scope for Phase 1.
 - Device-role flag naming only (`--capture`/`--playback`). Never name a flag by
   network direction (no `--incoming`/`--outgoing`/`--send`/`--receive`).
 

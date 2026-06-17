@@ -53,7 +53,18 @@ shared mutability.
 
 - Opus via the `opus` crate (libopus). 48 kHz internal.
 - Frame size 20 ms (standard voice).
-- Mono, 1 channel (requested explicitly from cpal, not delegated to the OS mixer).
+- Mono, 1 channel end-to-end: the Opus codec and the UDP wire format are always
+  mono. Preferred path is to request a mono stream from cpal directly (works on
+  real hardware). Where a device offers no mono config — notably VB-Cable, which on
+  WASAPI shared mode exposes only 48 kHz *stereo* — vox opens the stream at the
+  device's native channel count and does its own deterministic mix: downmix to mono
+  before encode, upmix mono→stereo after decode. The mix stays under our control
+  (not the OS mixer — the original intent), and the wire/codec stay uniformly mono,
+  so the connectionless symmetric peers (§1) need no channel-count negotiation and
+  the packet header (§5) carries no channel field.
+  - Revisit (post-MVP): native stereo end-to-end (no mix) is deferred — it would
+    require a channel field in the header or a handshake the connectionless model
+    lacks. Decision established empirically at M1 (VB-Cable is stereo-only here).
 - FEC enabled (in-band). Encoder: FEC on, expected-packet-loss ~5–10%
   (justified by WiFi on the client leg), DTX on.
 - FEC ↔ jitter buffer are coupled: FEC reconstructs a lost frame N from a
