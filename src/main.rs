@@ -1,9 +1,9 @@
-//! vox — M2 loopback: hear yourself.
+//! vox — M3 codec loopback: hear yourself, through Opus.
 //!
-//! Routes raw PCM from a capture device through an SPSC ring to a playback device
-//! on one machine — no network, no codec (DESIGN §2, §3). The locked CLI (DESIGN
-//! §6) lands at M6; until then inputs come from environment variables, defaulting
-//! to the host default devices.
+//! Routes PCM from a capture device through Opus encode→decode (on a worker thread)
+//! to a playback device on one machine — no network (DESIGN §2, §3, §4). The locked
+//! CLI (DESIGN §6) lands at M6; until then inputs come from environment variables,
+//! defaulting to the host default devices.
 
 mod device;
 mod loopback;
@@ -26,13 +26,22 @@ fn main() -> Result<()> {
     let play_spec = env_or("VOX_PLAYBACK", "default");
     let ring_ms: u32 = env_parse("VOX_RING_MS", 50);
     let secs: u64 = env_parse("VOX_SECS", 30);
+    let bitrate: i32 = env_parse("VOX_BITRATE", 24_000);
 
     let capture = device::resolve(&host, Role::Capture, &cap_spec)?
         .ok_or_else(|| anyhow!("capture is 'none'; loopback needs a capture device"))?;
     let playback = device::resolve(&host, Role::Playback, &play_spec)?
         .ok_or_else(|| anyhow!("playback is 'none'; loopback needs a playback device"))?;
 
-    loopback::run(&capture, &playback, loopback::Params { ring_ms, secs })
+    loopback::run(
+        &capture,
+        &playback,
+        loopback::Params {
+            ring_ms,
+            secs,
+            bitrate,
+        },
+    )
 }
 
 fn env_or(key: &str, default: &str) -> String {
