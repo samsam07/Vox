@@ -1,48 +1,15 @@
-[package]
-name = "vox"
-version = "0.1.0"
-edition = "2021"
-description = "Free, headless, bidirectional real-time voice pipe over LAN UDP"
-license = "MIT OR Apache-2.0"
-
-[dependencies]
-# Audio I/O — maintained, callback-complete, pure-Rust.
-# (PortAudio's Rust binding is abandoned/callback-incomplete — see DESIGN §4.)
-cpal = "0.16"
-
-# Opus codec via libopus. Builds bundled libopus -> needs cmake + a C compiler.
-opus = "0.3"
-
-# SPSC lock-free ring buffer for the capture path / jitter buffer.
-ringbuf = "0.4"
-
-# CLI.
-clap = { version = "4", features = ["derive"] }
-
-# Config.
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-
-# Errors.
-thiserror = "1"
-anyhow = "1"
-
-# Logging (wire up at M6).
-log = "0.4"
-env_logger = "0.11"
-
-# [PHASE-2] resampling (M9/M10): rubato
-# [PHASE-2] evaluate pure-Rust Opus to drop the C build: opus-rs
+[workspace]
+members = ["crates/vox-core", "crates/vox"]
+resolver = "2"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 
-# Windows/MSVC: the bundled libopus C build (audiopus_sys via cmake) links the
-# debug CRT (/MDd) under a debug profile, but rustc links the release CRT
-# (msvcrt) — yielding unresolved `_CrtDbgReportW` at link time. Building just the
-# sys crate optimized switches its cmake build to the release CRT (/MD), matching
-# rustc, so plain `cargo run` links. Our own crate stays unoptimized/debuggable.
+# Windows/MSVC: build the bundled libopus C dep (audiopus_sys via cmake) optimized
+# even in dev so it links the release CRT (/MD), matching rustc — otherwise debug
+# builds fail to link with unresolved `_CrtDbgReportW`. Our own crates stay
+# unoptimized/debuggable. (Workspace-level: package profile overrides live here.)
 [profile.dev.package.audiopus_sys]
 opt-level = 3

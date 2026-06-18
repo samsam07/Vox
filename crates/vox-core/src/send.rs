@@ -1,6 +1,6 @@
-//! Send path: capture callback → capture ring → send thread (downmix → Opus
-//! encode → packetize → UDP). The send thread solely owns the one Opus encoder
-//! (DESIGN §2). The capture callback is sacred: a non-blocking ring push only.
+//! Send thread: drain the capture ring → downmix → Opus encode → packetize → UDP.
+//! Owns the one Opus encoder (DESIGN §2). The capture-ring producer lives in the
+//! platform's record callback (a [`crate::CaptureSink`]); this is the consumer end.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,85 +9,50 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{Device, Stream};
-use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::{HeapCons, HeapRb};
+use ringbuf::traits::Consumer;
+use ringbuf::HeapCons;
 
-use crate::audio::{self, FRAME, MAX_PACKET, RATE};
-use crate::device::Role;
+use crate::audio::{FRAME, MAX_PACKET, RATE};
 use crate::packet;
 
-/// Live send path. Holds the capture stream (must stay on the main thread) and the
-/// send thread; dropping/stopping it tears both down.
-pub struct Sender {
-    stream: Stream,
-    thread: Option<JoinHandle<Result<()>>>,
+pub(crate) struct SendThread {
+    thread: JoinHandle<Result<()>>,
     stop: Arc<AtomicBool>,
-    packets: Arc<AtomicU64>,
+    pub(crate) packets: Arc<AtomicU64>,
 }
 
-impl Sender {
-    /// Signal the send thread to stop, join it, and report.
-    pub fn stop_and_join(mut self) -> Result<()> {
+impl SendThread {
+    pub(crate) fn stop_and_join(self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
-        let _ = self.stream.pause();
-        let result = match self.thread.take() {
-            Some(handle) => match handle.join() {
-                Ok(result) => result,
-                Err(_) => bail!("send thread panicked"),
-            },
-            None => Ok(()),
-        };
-        println!("  send: {} packets sent", self.packets.load(Ordering::Relaxed));
-        result
+        match self.thread.join() {
+            Ok(result) => result,
+            Err(_) => bail!("send thread panicked"),
+        }
     }
 }
 
-/// Start capturing from `device`, encoding, and sending frames to `peer`.
-pub fn start(
+pub(crate) fn spawn(
+    consumer: HeapCons<f32>,
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
-    device: &Device,
-    ring_ms: u32,
+    channels: usize,
     bitrate: i32,
-) -> Result<Sender> {
-    let channels = audio::pick_channels(device, Role::Capture)?;
-    let ring = HeapRb::<f32>::new(audio::ring_capacity(ring_ms, channels));
-    let (mut producer, consumer) = ring.split();
-
+) -> Result<SendThread> {
     let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
         .context("create opus encoder")?;
     encoder
         .set_bitrate(opus::Bitrate::Bits(bitrate))
         .context("set opus bitrate")?;
 
-    let stream = device
-        .build_input_stream::<f32, _, _>(
-            &audio::stream_config(channels),
-            // SACRED: non-blocking ring push only.
-            move |data: &[f32], _| {
-                producer.push_slice(data);
-            },
-            move |err| eprintln!("capture stream error: {err}"),
-            None,
-        )
-        .context("build capture stream")?;
-
     let stop = Arc::new(AtomicBool::new(false));
     let packets = Arc::new(AtomicU64::new(0));
     let thread = {
         let stop = Arc::clone(&stop);
         let packets = Arc::clone(&packets);
-        thread::spawn(move || {
-            send_loop(consumer, socket, peer, encoder, channels as usize, stop, packets)
-        })
+        thread::spawn(move || send_loop(consumer, socket, peer, encoder, channels, stop, packets))
     };
-    stream.play().context("start capture stream")?;
-
-    Ok(Sender {
-        stream,
-        thread: Some(thread),
+    Ok(SendThread {
+        thread,
         stop,
         packets,
     })

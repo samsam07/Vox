@@ -925,11 +925,19 @@ dependencies = [
  "cpal",
  "env_logger",
  "log",
+ "serde",
+ "toml",
+ "vox-core",
+]
+
+[[package]]
+name = "vox-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
  "opus",
  "ringbuf",
- "serde",
- "thiserror",
- "toml",
 ]
 
 [[package]]

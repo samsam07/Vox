@@ -56,9 +56,13 @@ Mirror M4 into both directions: four threads, both rings, both machines.
 - Exit: real two-way conversation over LAN.
 - Applies: DESIGN §2 entire.
 
-### M6 — CLI + config + Apollo integration
-Wrap engine in the locked CLI; TOML config mode with flag overrides; wire Apollo
-command-on-connect / command-on-disconnect hooks.
+### M6 — crate split + CLI + config + Apollo integration
+Done in two steps:
+- **M6a (extract):** split into the `vox-core` library + `vox` binary workspace
+  (DESIGN §11) as a behaviour-preserving refactor — engine into `vox-core`, cpal +
+  the temporary env driver into `vox`. Exit: the M5 duplex test still passes.
+- **M6b (CLI):** wrap the engine in the locked CLI; TOML config mode with flag
+  overrides; wire Apollo command-on-connect / command-on-disconnect hooks.
 - Exit: vox starts/stops with a Moonlight session from a one-liner or TOML.
 - `[CRYSTALLIZE]` VOX_DEFAULT_PORT value; TOML default values (DESIGN §6, §7).
 - **MVP COMPLETE — usable daily for its real purpose.**
@@ -93,3 +97,4 @@ M1 dual-stream smoke test on ALSA/PipeWire.
 ### M12 — `cargo-zigbuild` cross-compile from Fedora (Linux→Windows).
 ### M13 — packaging, logging/diagnostics, config validation, external-user docs.
 ### M13b — `[PHASE-3]` evaluate `opus-rs` to drop the libopus C dependency.
+### M14 — `[PHASE-3]` Android front-end on `vox-core` (Oboe/AAudio + JNI/uniffi, libopus via NDK) — walkie-talkie app.

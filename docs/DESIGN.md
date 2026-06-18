@@ -148,3 +148,26 @@ Mirror instance on the peer runs the same two paths.
 
 Encryption; >2 peers; GUI; audio mixing/effects; half-duplex-by-default (duplex is
 the definition; one direction is achieved via `--capture none` / `--playback none`).
+
+## 11. Crate structure (locked at M6)
+
+vox is a Cargo workspace, split so the engine can be reused behind other
+front-ends (e.g. an Android walkie-talkie) without dragging in the desktop CLI:
+
+- `vox-core` (library): the platform-agnostic engine — Opus codec, UDP transport,
+  packet format, send/receive threads, the capture ring and the jitter buffer. It
+  does NOT depend on cpal. It exposes the SPSC ring ends as the audio seam: a
+  capture sink (the platform's record callback pushes device-native interleaved
+  PCM in, non-blocking) and a playback source (the platform's play callback pulls
+  PCM out, non-blocking). Downmix-to-mono / upmix stay inside the core (send /
+  receive threads); the platform only supplies the channel count.
+- `vox` (binary): the desktop platform + UI — cpal device enumeration/resolution
+  and stream construction (whose sacred callbacks call the core's sink/source),
+  plus the clap CLI, TOML config, and Apollo hooks.
+
+The seam is exactly §2/§3's ring boundary made public; the sacred-callback rule is
+unchanged (callbacks do only the non-blocking sink-push / source-pop).
+
+`[PHASE-3]` an Android front-end is a second `vox-core` consumer: Oboe/AAudio (via
+JNI/uniffi) feeds the same sink/source, libopus builds via the NDK. Not pursued in
+Phase 1 — the split only keeps it possible without re-architecting later.
