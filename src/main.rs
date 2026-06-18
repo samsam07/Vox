@@ -1,10 +1,11 @@
-//! vox — M4 one-way over UDP.
+//! vox — M5 full duplex over UDP.
 //!
 //! Symmetric instance: if a capture device is selected it captures → encodes →
 //! sends to the peer; if a playback device is selected it receives → decodes →
-//! plays. One direction is achieved by setting the other role to `none` (DESIGN
-//! §1, §2). The locked CLI (DESIGN §6) lands at M6; until then inputs come from
-//! environment variables.
+//! plays. With both selected, both run at once — four threads, both rings, a
+//! two-way conversation (DESIGN §2). One-way is achieved by setting the other
+//! role to `none` (DESIGN §1). The locked CLI (DESIGN §6) lands at M6; until then
+//! inputs come from environment variables.
 
 mod audio;
 mod device;
@@ -47,6 +48,10 @@ fn main() -> Result<()> {
     if capture.is_none() && playback.is_none() {
         bail!("both --capture and --playback are 'none'; nothing to do");
     }
+    // Echo the resolved roles so a stale env var (e.g. a lingering VOX_CAPTURE=none)
+    // is obvious rather than surfacing as a cryptic mode.
+    println!("capture:  {}", describe_device(&capture));
+    println!("playback: {}", describe_device(&playback));
     if playback.is_some() && bind_port == 0 {
         bail!("set VOX_BIND to the local port the peer sends to (receiving needs a known port)");
     }
@@ -70,7 +75,13 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    println!("running for {secs}s ...");
+    let mode = match (sender.is_some(), receiver.is_some()) {
+        (true, true) => "full duplex",
+        (true, false) => "send-only",
+        (false, true) => "receive-only",
+        (false, false) => unreachable!("guarded above: not both none"),
+    };
+    println!("mode: {mode}; running for {secs}s ...");
     thread::sleep(Duration::from_secs(secs));
 
     println!("results:");
@@ -85,6 +96,14 @@ fn main() -> Result<()> {
 
 /// Read an env var, trimmed; fall back to `default` if unset or blank. Trimming
 /// guards against the cmd.exe `set X=Y && ...` trailing-space footgun.
+fn describe_device(device: &Option<cpal::Device>) -> String {
+    use cpal::traits::DeviceTrait;
+    match device {
+        Some(device) => device.name().unwrap_or_else(|_| "<unknown>".to_string()),
+        None => "none".to_string(),
+    }
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
         .ok()
