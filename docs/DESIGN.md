@@ -79,8 +79,13 @@ shared mutability.
 
 UDP datagram = small header + Opus payload.
 - Sequence number (2–4 bytes) — drives gap detection for jitter ordering and FEC.
-- `[CRYSTALLIZE]` exact header layout (byte order, whether a timestamp field is
-  included) — fix at the M4 slice.
+- Crystallized at M4 — 8-byte big-endian (network order) header, then payload:
+  - bytes 0..4: `seq` — u32, increments by 1 per 20 ms frame. Drives gap detection
+    and ordering; wrap-aware comparison (never wraps in practice: ~2.7 years).
+  - bytes 4..8: `timestamp` — u32, sample count of the frame's first sample
+    (increments by 960). Carried for Phase-2 clock-drift/playout work; the MVP
+    receiver does not consume it.
+  - bytes 8..: Opus payload (one encoded 20 ms mono frame).
 
 ## 6. CLI (locked)
 

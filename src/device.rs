@@ -58,6 +58,7 @@ fn print_devices(devices: impl Iterator<Item = Device>, default_name: Option<&st
 /// `none` disables the role (`Ok(None)`), `default` selects the host default,
 /// anything else is an exact device-name match.
 pub fn resolve(host: &Host, role: Role, spec: &str) -> Result<Option<Device>> {
+    let spec = spec.trim();
     if spec == "none" {
         return Ok(None);
     }
