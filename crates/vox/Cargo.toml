@@ -15,10 +15,13 @@ vox-core = { path = "../vox-core" }
 # Audio I/O (desktop platform layer).
 cpal = "0.16"
 
-# CLI + config (wired up at M6b).
+# CLI + config.
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+# Cross-platform stop signal (Ctrl+C / SIGINT / SIGTERM / Windows console close).
+ctrlc = "3"
 
 anyhow = "1"
 log = "0.4"

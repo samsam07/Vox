@@ -1,0 +1,30 @@
+# Example vox config. Every key has an identically-named CLI flag that OVERRIDES
+# it (precedence: flag > this file > built-in default). Run: `vox vox.toml`.
+# This example is a full-duplex peer; edit `peer` and run a mirror on the other
+# machine pointing back at this one.
+
+# --- Connection ---
+peer = "192.168.1.50"   # send target, host[:port]. Port omitted -> 9680.
+bind = 9680             # local UDP receive port (only needed when receiving).
+
+# --- Devices (role names; "none" | "default" | "exact device name") ---
+capture  = "default"    # local record device. "none" = receive-only.
+playback = "default"    # local play device.   "none" = send-only.
+
+# --- Device properties ---
+# Phase 1 is 48 kHz only (other values are rejected; non-48k is a Phase-2 feature).
+capture_sample_rate  = 48000
+playback_sample_rate = 48000
+# Channel count per device. Omit to auto-negotiate (mono if the device supports it,
+# else stereo — e.g. VB-Cable is stereo-only). Set 1 or 2 to force.
+# capture_channels  = 1
+# playback_channels = 1
+
+# --- Codec / send-path (encoder only) ---
+bitrate       = 24000   # Opus target bits/s (voice-grade).
+fec           = false   # in-band FEC. Parsed now; takes effect at M7.
+expected_loss = 10      # % loss to tune FEC for (~5-10%, WiFi leg). M7.
+dtx           = false   # discontinuous transmission. Parsed now; takes effect at M7.
+
+# --- Receive-path ---
+jitter_ms = 50          # jitter buffer depth (~40-60 ms).

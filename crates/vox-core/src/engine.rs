@@ -9,18 +9,18 @@ use anyhow::{bail, Result};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-use crate::audio::ring_capacity;
+use crate::audio::{ring_capacity, CAPTURE_RING_MS};
 use crate::{net, receive, send};
 
-/// How to start an engine. `peer` is required to capture/send; a playback channel
-/// count is required to receive/play. Channel counts are the device's (the engine
-/// downmixes to mono on the wire and upmixes back).
+/// How to start an engine. `peer` is required to capture/send; `bind` is required
+/// to receive (and is the port the peer targets). Channel counts are the device's
+/// (the engine downmixes to mono on the wire and upmixes back).
 pub struct EngineConfig {
     pub peer: Option<SocketAddr>,
-    pub bind_port: u16,
+    /// Local UDP port. `None` → an ephemeral source port (send-only, no listener).
+    pub bind: Option<u16>,
     pub capture_channels: Option<u16>,
     pub playback_channels: Option<u16>,
-    pub ring_ms: u32,
     pub jitter_ms: u32,
     pub bitrate: i32,
 }
@@ -86,11 +86,15 @@ impl Engine {
         if config.capture_channels.is_none() && config.playback_channels.is_none() {
             bail!("engine has neither a capture nor a playback role");
         }
-        let socket = net::bind(config.bind_port)?;
+        if config.playback_channels.is_some() && config.bind.is_none() {
+            bail!("a playback (receive) role requires a bind port for the peer to target");
+        }
+        // `None` bind → port 0, i.e. an OS-assigned ephemeral source port.
+        let socket = net::bind(config.bind.unwrap_or(0))?;
 
         let (sender, capture) = match (config.capture_channels, config.peer) {
             (Some(channels), Some(peer)) => {
-                let ring = HeapRb::<f32>::new(ring_capacity(config.ring_ms, channels));
+                let ring = HeapRb::<f32>::new(ring_capacity(CAPTURE_RING_MS, channels));
                 let (producer, consumer) = ring.split();
                 let thread = send::spawn(
                     consumer,

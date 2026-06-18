@@ -96,9 +96,13 @@ vox --peer <host[:port]> [--bind <port>] [flags]   # ad-hoc mode
 
 Connection:
 - `--peer <host[:port]>` — send target. Port omitted → VOX_DEFAULT_PORT.
-- `--bind <port>` — local receive port. Omitted → VOX_DEFAULT_PORT.
+- `--bind <port>` — local receive port. Omitted → VOX_DEFAULT_PORT *when receiving*
+  (a playback device is set). A send-only instance (`--playback none`) needs no
+  fixed bind: it sends from an OS-assigned ephemeral source port and opens no
+  listener (crystallized at M6).
 - No host/connect verb. Symmetric peers.
-- `[CRYSTALLIZE]` VOX_DEFAULT_PORT numeric value — fix at M6.
+- VOX_DEFAULT_PORT = 9680 (UDP). Clear of VBAN (6980) and Moonlight/Apollo
+  (~47984–48010), and below the ephemeral range.
 
 Devices (local-role naming only):
 - `--capture <none|default|"name">` — local record device. Omitted → `default`.
@@ -118,12 +122,19 @@ they belong to:
 Rationale: bitrate/FEC/DTX are encoder settings on the send path; playback has no
 bitrate (decode is parameter-free). Naming them per-device would be a category error.
 
-## 7. TOML schema (locked shape, values `[CRYSTALLIZE]` at M6)
+## 7. TOML schema (crystallized at M6)
 
 Keys mirror flags using role naming: `peer`, `bind`, `capture`, `playback`,
 `capture_sample_rate`, `playback_sample_rate`, `capture_channels`,
 `playback_channels`, `bitrate`, `fec`, `expected_loss`, `dtx`, `jitter_ms`.
-Flags override TOML.
+Precedence: flag > TOML > default. See `samples/vox.toml`.
+
+Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
+`*_sample_rate` 48000 (the only valid value in Phase 1), `*_channels`
+auto-negotiated (mono if the device supports it, else stereo), `bitrate` 24000,
+`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 50. `fec` /
+`expected_loss` / `dtx` are parsed but not yet acted on — they take effect at M7
+(FEC), when `fec`'s default flips to true.
 
 ## 8. Build (locked)
 

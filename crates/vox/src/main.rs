@@ -1,86 +1,74 @@
-//! vox — desktop platform + CLI over the vox-core engine (DESIGN §11).
+//! vox — desktop platform + CLI over the vox-core engine (DESIGN §6, §11).
 //!
-//! Resolves cpal capture/playback devices, starts the engine, and wires the cpal
-//! stream callbacks to the engine's ring ports (capture cb → CaptureSink::push,
-//! playback cb → PlaybackSource::fill). The locked CLI (DESIGN §6) lands at M6b;
-//! until then inputs come from environment variables.
+//! Parses the CLI/TOML config, resolves cpal capture/playback devices, starts the
+//! engine, wires the cpal stream callbacks to the engine's ring ports, and runs
+//! until a stop signal (Ctrl+C / SIGINT / SIGTERM) or an optional `--duration`.
 
+mod cli;
+mod config;
 mod device;
 
-use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
+use clap::Parser;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Stream};
 
+use cli::Cli;
+use config::{Config, DEFAULT_PORT};
 use device::Role;
 use vox_core::{CaptureSink, Engine, EngineConfig, PlaybackSource};
 
 fn main() -> Result<()> {
+    env_logger::init();
+    let cli = Cli::parse();
     let host = cpal::default_host();
-    println!("cpal host: {}", host.id().name());
-    device::list_devices(&host)?;
-    println!();
 
-    // Temporary M6a inputs (replaced by the locked CLI at M6b). VOX_CAPTURE /
-    // VOX_PLAYBACK accept the same `none|default|name` specs as the future flags.
-    let cap_spec = env_or("VOX_CAPTURE", "default");
-    let play_spec = env_or("VOX_PLAYBACK", "default");
-    let ring_ms: u32 = env_parse("VOX_RING_MS", 50);
-    let jitter_ms: u32 = env_parse("VOX_JITTER_MS", 50);
-    let bitrate: i32 = env_parse("VOX_BITRATE", 24_000);
-    let secs: u64 = env_parse("VOX_SECS", 30);
-    let bind_port: u16 = env_parse("VOX_BIND", 0);
-    let peer_spec = std::env::var("VOX_PEER")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    if cli.list_devices {
+        println!("cpal host: {}", host.id().name());
+        return device::list_devices(&host);
+    }
 
-    let capture = device::resolve(&host, Role::Capture, &cap_spec)?;
-    let playback = device::resolve(&host, Role::Playback, &play_spec)?;
+    let config = Config::build(cli)?;
+
+    let capture = device::resolve(&host, Role::Capture, &config.capture)?;
+    let playback = device::resolve(&host, Role::Playback, &config.playback)?;
     if capture.is_none() && playback.is_none() {
-        bail!("both --capture and --playback are 'none'; nothing to do");
+        bail!("both capture and playback are 'none'; nothing to do");
     }
-    if playback.is_some() && bind_port == 0 {
-        bail!("set VOX_BIND to the local port the peer sends to (receiving needs a known port)");
-    }
-    println!("capture:  {}", describe_device(&capture));
-    println!("playback: {}", describe_device(&playback));
 
-    // Negotiate channel counts (cpal probe) for whichever roles are active.
-    let capture_channels = capture
-        .as_ref()
-        .map(|d| device::pick_channels(d, Role::Capture))
-        .transpose()?;
-    let playback_channels = playback
-        .as_ref()
-        .map(|d| device::pick_channels(d, Role::Playback))
-        .transpose()?;
+    let capture_channels = channels_for(capture.as_ref(), config.capture_channels, Role::Capture)?;
+    let playback_channels =
+        channels_for(playback.as_ref(), config.playback_channels, Role::Playback)?;
 
-    let peer = match (&capture, &peer_spec) {
-        (Some(_), Some(spec)) => Some(vox_core::parse_peer(spec)?),
-        (Some(_), None) => return Err(anyhow!("set VOX_PEER (host:port) to send captured audio")),
+    let peer = match (&capture, &config.peer) {
+        (Some(_), Some(spec)) => Some(vox_core::parse_peer(&with_default_port(spec))?),
+        (Some(_), None) => bail!("--peer (host[:port]) is required to send captured audio"),
         (None, _) => None,
+    };
+    // Explicit bind wins; else default to 9680 when receiving; else ephemeral.
+    let bind = match (playback.is_some(), config.bind) {
+        (_, Some(port)) => Some(port),
+        (true, None) => Some(DEFAULT_PORT),
+        (false, None) => None,
     };
 
     let (engine, ports) = Engine::start(EngineConfig {
         peer,
-        bind_port,
+        bind,
         capture_channels,
         playback_channels,
-        ring_ms,
-        jitter_ms,
-        bitrate,
+        jitter_ms: config.jitter_ms,
+        bitrate: config.bitrate,
     })?;
-    println!("bound {}", engine.local_addr()?);
-    if let Some(peer) = peer {
-        println!("sending to {peer}");
-    }
+    print_summary(&config, &capture, &playback, &engine, peer)?;
 
-    // Wire the cpal stream callbacks to the engine's ring ports. The streams must
-    // outlive the run, so keep them in scope; dropping them stops the audio.
+    // Wire the cpal stream callbacks to the engine's ring ports. Keep the streams
+    // in scope for the session; dropping them stops the audio.
     let cap_stream = match (capture.as_ref(), ports.capture) {
         (Some(device), Some(sink)) => Some(build_capture(device, capture_channels.unwrap(), sink)?),
         _ => None,
@@ -92,29 +80,91 @@ fn main() -> Result<()> {
         _ => None,
     };
 
-    let mode = match (cap_stream.is_some(), play_stream.is_some()) {
-        (true, true) => "full duplex",
-        (true, false) => "send-only",
-        (false, true) => "receive-only",
-        (false, false) => unreachable!("guarded above: not both none"),
-    };
-    println!("mode: {mode}; running for {secs}s ...");
-    thread::sleep(Duration::from_secs(secs));
+    wait_for_stop(config.duration)?;
 
-    // Stop audio first, then the engine threads.
     drop(cap_stream);
     drop(play_stream);
     let stats = engine.stop()?;
-
-    println!("results:");
+    println!("stopped.");
     if capture.is_some() {
-        println!("  send: {} packets sent", stats.packets_sent);
+        println!("  send: {} packets", stats.packets_sent);
     }
     if playback.is_some() {
         println!(
-            "  recv: {} packets, {} gap frames (silence), {} late/dup dropped",
+            "  recv: {} packets, {} gap frames, {} late/dup dropped",
             stats.packets_received, stats.gap_frames, stats.dropped_late
         );
+    }
+    Ok(())
+}
+
+/// Forced channel count if given, else auto-negotiate, else `None` (role disabled).
+fn channels_for(device: Option<&Device>, forced: Option<u16>, role: Role) -> Result<Option<u16>> {
+    match (device, forced) {
+        (Some(_), Some(channels)) => Ok(Some(channels)),
+        (Some(device), None) => Ok(Some(device::pick_channels(device, role)?)),
+        (None, _) => Ok(None),
+    }
+}
+
+fn with_default_port(spec: &str) -> String {
+    if spec.contains(':') {
+        spec.to_string()
+    } else {
+        format!("{spec}:{DEFAULT_PORT}")
+    }
+}
+
+fn print_summary(
+    config: &Config,
+    capture: &Option<Device>,
+    playback: &Option<Device>,
+    engine: &Engine,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<()> {
+    let mode = match (capture.is_some(), playback.is_some()) {
+        (true, true) => "full duplex",
+        (true, false) => "send-only",
+        (false, true) => "receive-only",
+        (false, false) => unreachable!("guarded above"),
+    };
+    println!("vox: {mode}");
+    println!("  capture:  {}", describe_device(capture));
+    println!("  playback: {}", describe_device(playback));
+    if let Some(peer) = peer {
+        println!("  peer:     {peer}");
+    }
+    println!("  bind:     {}", engine.local_addr()?);
+    println!(
+        "  codec:    {} bps, jitter {} ms, fec={}, dtx={}, expected_loss={}%",
+        config.bitrate, config.jitter_ms, config.fec, config.dtx, config.expected_loss
+    );
+    if config.fec || config.dtx {
+        println!("  note: fec/dtx are parsed but take effect at M7.");
+    }
+    Ok(())
+}
+
+/// Block until Ctrl+C / SIGINT / SIGTERM, or until `duration` elapses.
+fn wait_for_stop(duration: Option<u64>) -> Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
+            .context("install signal handler")?;
+    }
+    match duration {
+        Some(secs) => println!("running for {secs}s (Ctrl+C to stop early)..."),
+        None => println!("running (Ctrl+C to stop)..."),
+    }
+    let deadline = duration.map(|secs| Instant::now() + Duration::from_secs(secs));
+    while !stop.load(Ordering::SeqCst) {
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
     }
     Ok(())
 }
@@ -152,19 +202,4 @@ fn describe_device(device: &Option<Device>) -> String {
         Some(device) => device.name().unwrap_or_else(|_| "<unknown>".to_string()),
         None => "none".to_string(),
     }
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
-
-fn env_parse<T: FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
 }
