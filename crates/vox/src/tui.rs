@@ -273,7 +273,7 @@ fn qline(label: &str, value: String, color: Option<Color>) -> Line<'static> {
         Some(c) => value.fg(c).bold(),
         None => value.into(),
     };
-    Line::from(vec![format!("{label:<8}").dark_gray(), value])
+    Line::from(vec![format!("{label:<9}").dark_gray(), value])
 }
 
 /// A throughput row: live rate (kbps + pkt/s) plus the cumulative volume since
