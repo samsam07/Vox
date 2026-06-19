@@ -11,7 +11,11 @@ For every slice, run the verification ritual in CLAUDE.md
 
 ---
 
-## Phase 1 — MVP (minimum to use daily)
+## Phase 1 — MVP (minimum to use daily) — ✅ COMPLETE
+
+All slices M0–M6 are done: vox is a working full-duplex LAN voice pipe (Opus over
+UDP, clap CLI + TOML, live TUI), verified machine-to-machine. The per-milestone
+detail below is the historical record of how it was built.
 
 ### M0 — Toolchain & skeleton proof
 `cargo new`; add `cpal` and `opus`; get the Opus bundled-libopus build working
@@ -73,7 +77,7 @@ status and the TUI.
 
 ---
 
-## Phase 2 — daily-driver polish
+## Phase 2 — daily-driver polish — next up
 
 ### M7 — FEC + graceful loss
 Enable Opus in-band FEC + gap-detection→FEC-decode (deferred from M4/M5). Test
