@@ -6,12 +6,13 @@ use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::symbols::Marker;
+use ratatui::symbols::braille;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, BorderType, Chart, Dataset, Gauge, GraphType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Gauge, Padding, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use vox_core::{Engine, EngineStats};
@@ -22,6 +23,10 @@ use crate::{kbps, SessionInfo};
 const SAMPLE: Duration = Duration::from_millis(500);
 /// Number of rate samples kept for the throughput graph.
 const HISTORY: usize = 240;
+/// Throughput-graph series colours: tx, rx, and cells where both lines overlap.
+const TX_COLOR: Color = Color::Green;
+const RX_COLOR: Color = Color::Cyan;
+const BOTH_COLOR: Color = Color::Yellow;
 
 /// Run the dashboard until the user quits (q / Esc / Ctrl+C) or `duration` elapses.
 pub fn run(engine: &Engine, info: &SessionInfo, duration: Option<u64>) -> Result<()> {
@@ -102,7 +107,7 @@ fn draw(
 ) {
     let [header_a, mid_a, chart_a, footer_a] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(10),
+        Constraint::Length(11),
         Constraint::Min(6),
         Constraint::Length(1),
     ])
@@ -131,10 +136,33 @@ fn draw(
         kv("bind", &info.bind.to_string()),
         kv("uptime", &format_duration(uptime)),
         Line::from(""),
-        rate_line("tx", rate.tx_kbps, rate.tx_pps, Color::Green),
-        rate_line("rx", rate.rx_kbps, rate.rx_pps, Color::Cyan),
+        throughput_line("tx", rate.tx_kbps, rate.tx_pps, stats.bytes_sent, TX_COLOR),
+        throughput_line(
+            "rx",
+            rate.rx_kbps,
+            rate.rx_pps,
+            stats.bytes_received,
+            RX_COLOR,
+        ),
+        // White + bold, not BOTH_COLOR: yellow would read as "the yellow graph line
+        // is the total", but yellow there means the tx/rx overlap.
+        Line::from(vec![
+            format!("{:<8}", "total").white().bold(),
+            format!("{:>5.0} kbps", rate.tx_kbps + rate.rx_kbps)
+                .white()
+                .bold(),
+            format!("  {:>4.0} pkt/s", rate.tx_pps + rate.rx_pps)
+                .white()
+                .bold(),
+            format!(
+                "   {:>9}",
+                human_bytes(stats.bytes_sent + stats.bytes_received)
+            )
+            .white()
+            .bold(),
+        ]),
     ])
-    .block(rounded("status"));
+    .block(rounded("Status"));
     frame.render_widget(status, status_a);
 
     // Jitter-buffer gauge.
@@ -151,7 +179,7 @@ fn draw(
         Color::Green
     };
     let jitter = Gauge::default()
-        .block(rounded("jitter buffer"))
+        .block(rounded("Jitter buffer"))
         .gauge_style(Style::new().fg(jcolor))
         .ratio(jratio)
         .label(format!("{:.0}%", jratio * 100.0));
@@ -178,12 +206,11 @@ fn draw(
         qline("drops", stats.dropped_late.to_string(), None),
         qline("overrun", stats.overruns.to_string(), overrun_color),
     ])
-    .block(rounded("quality"));
+    .block(rounded("Quality"));
     frame.render_widget(quality, quality_a);
 
-    // Throughput graph (braille line, tx green + rx cyan).
-    let tx_points = points(tx_history);
-    let rx_points = points(rx_history);
+    // Throughput graph: custom braille plot so tx / rx / their overlap colour
+    // independently, with a value interpolated at every sub-column (gap-free).
     let max_y = tx_history
         .iter()
         .chain(rx_history)
@@ -191,29 +218,26 @@ fn draw(
         .fold(0.0f64, f64::max)
         .max(48.0)
         * 1.2;
-    let datasets = vec![
-        Dataset::default()
-            .name("tx")
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::new().green())
-            .data(&tx_points),
-        Dataset::default()
-            .name("rx")
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::new().cyan())
-            .data(&rx_points),
-    ];
-    let chart = Chart::new(datasets)
-        .block(rounded("throughput kbps"))
-        .x_axis(Axis::default().bounds([0.0, (HISTORY - 1) as f64]))
-        .y_axis(
-            Axis::default()
-                .bounds([0.0, max_y])
-                .labels(vec![Span::raw("0"), Span::raw(format!("{max_y:.0}"))]),
-        );
-    frame.render_widget(chart, chart_a);
+    let graph_block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1))
+        .title(Line::from(vec![
+            " Throughput kbps   ".cyan().bold(),
+            "tx ".fg(TX_COLOR).bold(),
+            "rx ".fg(RX_COLOR).bold(),
+            "both".fg(BOTH_COLOR).bold(),
+            format!("   (0–{max_y:.0}) ").dark_gray(),
+        ]));
+    let graph_inner = graph_block.inner(chart_a);
+    frame.render_widget(graph_block, chart_a);
+    braille_graph(
+        frame.buffer_mut(),
+        graph_inner,
+        tx_history,
+        rx_history,
+        max_y,
+    );
 
     let footer = Paragraph::new("q / Esc / Ctrl+C to quit".dark_gray());
     frame.render_widget(footer, footer_a);
@@ -223,6 +247,7 @@ fn rounded(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1))
         .title(Span::from(format!(" {title} ")).cyan().bold())
 }
 
@@ -241,20 +266,111 @@ fn qline(label: &str, value: String, color: Option<Color>) -> Line<'static> {
     Line::from(vec![format!("{label:<8}").dark_gray(), value])
 }
 
-fn rate_line(label: &str, kbps_val: f64, pps: f64, color: Color) -> Line<'static> {
+/// A throughput row: live rate (kbps + pkt/s) plus the cumulative volume since
+/// start (tx = sent, rx = received, total = both).
+fn throughput_line(label: &str, kbps: f64, pps: f64, bytes: u64, color: Color) -> Line<'static> {
     Line::from(vec![
-        format!("{label:<9}").dark_gray(),
-        format!("{kbps_val:>5.0} kbps").fg(color).bold(),
-        format!("   {pps:>4.0} pkt/s").dark_gray(),
+        format!("{label:<8}").dark_gray(),
+        format!("{kbps:>5.0} kbps").fg(color).bold(),
+        format!("  {pps:>4.0} pkt/s").dark_gray(),
+        format!("   {:>9}", human_bytes(bytes)).fg(color),
     ])
 }
 
-fn points(history: &[f64]) -> Vec<(f64, f64)> {
-    history
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as f64, v))
-        .collect()
+/// Human-readable byte count (B / KB / MB / GB).
+fn human_bytes(bytes: u64) -> String {
+    const K: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < K {
+        format!("{bytes} B")
+    } else if b < K * K {
+        format!("{:.1} KB", b / K)
+    } else if b < K * K * K {
+        format!("{:.1} MB", b / (K * K))
+    } else {
+        format!("{:.1} GB", b / (K * K * K))
+    }
+}
+
+/// One braille cell's state: dot bits, and which series passed through it.
+#[derive(Clone, Copy, Default)]
+struct GraphCell {
+    bits: u16,
+    tx: bool,
+    rx: bool,
+}
+
+/// Render tx and rx as continuous braille lines into `area`, colouring each cell by
+/// which series cross it (tx, rx, or both). Braille gives 2x4 sub-pixels per cell;
+/// a value is interpolated at every sub-column and vertically connected to the
+/// previous one, so the line has no gaps.
+fn braille_graph(buf: &mut Buffer, area: Rect, tx: &[f64], rx: &[f64], max_y: f64) {
+    let (w, h) = (area.width as usize, area.height as usize);
+    if w == 0 || h == 0 || max_y <= 0.0 {
+        return;
+    }
+    let (cols, rows) = (w * 2, h * 4);
+    let mut cells = vec![GraphCell::default(); w * h];
+
+    plot(&mut cells, w, cols, rows, tx, max_y, true);
+    plot(&mut cells, w, cols, rows, rx, max_y, false);
+
+    for cy in 0..h {
+        for cx in 0..w {
+            let cell = cells[cy * w + cx];
+            if cell.bits == 0 {
+                continue;
+            }
+            let ch = char::from_u32(braille::BLANK as u32 | cell.bits as u32).unwrap_or('\u{2800}');
+            let color = match (cell.tx, cell.rx) {
+                (true, true) => BOTH_COLOR,
+                (true, false) => TX_COLOR,
+                (false, true) => RX_COLOR,
+                (false, false) => continue,
+            };
+            let target = &mut buf[(area.x + cx as u16, area.y + cy as u16)];
+            target.set_char(ch);
+            target.set_fg(color);
+        }
+    }
+}
+
+/// Plot one series into the braille cell grid, connecting consecutive sub-columns.
+fn plot(
+    cells: &mut [GraphCell],
+    w: usize,
+    cols: usize,
+    rows: usize,
+    data: &[f64],
+    max_y: f64,
+    is_tx: bool,
+) {
+    if data.len() < 2 {
+        return;
+    }
+    let mut prev_y: Option<usize> = None;
+    for sx in 0..cols {
+        // Interpolate the value at this sub-column from the history.
+        let f = sx as f64 / (cols - 1) as f64 * (data.len() - 1) as f64;
+        let i0 = f.floor() as usize;
+        let i1 = (i0 + 1).min(data.len() - 1);
+        let value = data[i0] + (data[i1] - data[i0]) * (f - i0 as f64);
+        // Map value to a sub-row (row 0 = top, so higher value = smaller index).
+        let norm = (value / max_y).clamp(0.0, 1.0);
+        let y = (rows - 1) - (norm * (rows - 1) as f64).round() as usize;
+        // Connect from the previous sub-column's height to this one.
+        let (lo, hi) = prev_y.map_or((y, y), |p| (p.min(y), p.max(y)));
+        for yy in lo..=hi {
+            let cell = &mut cells[(yy / 4) * w + sx / 2];
+            cell.bits |= braille::DOTS[yy % 4][sx % 2];
+            if is_tx {
+                cell.tx = true;
+            } else {
+                cell.rx = true;
+            }
+        }
+        prev_y = Some(y);
+    }
 }
 
 fn push(history: &mut Vec<f64>, value: f64) {
