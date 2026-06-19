@@ -3,11 +3,17 @@
 //! Parses the CLI/TOML config, resolves cpal capture/playback devices, starts the
 //! engine, wires the cpal stream callbacks to the engine's ring ports, and runs
 //! until a stop signal (Ctrl+C / SIGINT / SIGTERM) or an optional `--duration`.
+//! Output goes through `log` in plain/quiet mode (see `logging`); `--output tui`
+//! renders a live dashboard instead. stdout is reserved for `--list-devices` /
+//! `--print-config`.
 
 mod cli;
 mod config;
 mod device;
+mod logging;
+mod tui;
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -17,23 +23,44 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Stream};
+use log::{error, info, warn};
 
-use cli::Cli;
+use cli::{Cli, OutputMode};
 use config::{Config, DEFAULT_PORT};
 use device::Role;
-use vox_core::{CaptureSink, Engine, EngineConfig, PlaybackSource};
+use vox_core::{CaptureSink, Engine, EngineConfig, EngineStats, PlaybackSource};
+
+/// How often the plain status line is emitted.
+const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Resolved, display-ready session facts shared by the plain summary and the TUI.
+pub(crate) struct SessionInfo {
+    pub mode: &'static str,
+    pub capture: String,
+    pub playback: String,
+    pub peer: Option<SocketAddr>,
+    pub bind: SocketAddr,
+    pub bitrate: i32,
+    pub jitter_ms: u32,
+    pub fec: bool,
+    pub dtx: bool,
+}
 
 fn main() -> Result<()> {
-    env_logger::init();
     let cli = Cli::parse();
+    let output = cli.output;
+    logging::init(output, cli.verbose);
     let host = cpal::default_host();
 
     if cli.list_devices {
-        println!("cpal host: {}", host.id().name());
         return device::list_devices(&host);
     }
-
+    let print_config = cli.print_config;
     let config = Config::build(cli)?;
+    if print_config {
+        config.print();
+        return Ok(());
+    }
 
     let capture = device::resolve(&host, Role::Capture, &config.capture)?;
     let playback = device::resolve(&host, Role::Playback, &config.playback)?;
@@ -65,7 +92,26 @@ fn main() -> Result<()> {
         jitter_ms: config.jitter_ms,
         bitrate: config.bitrate,
     })?;
-    print_summary(&config, &capture, &playback, &engine, peer)?;
+
+    let info = SessionInfo {
+        mode: mode_label(&capture, &playback),
+        capture: format!(
+            "{}{}",
+            describe_device(&capture),
+            channels_label(capture_channels)
+        ),
+        playback: format!(
+            "{}{}",
+            describe_device(&playback),
+            channels_label(playback_channels)
+        ),
+        peer,
+        bind: engine.local_addr()?,
+        bitrate: config.bitrate,
+        jitter_ms: config.jitter_ms,
+        fec: config.fec,
+        dtx: config.dtx,
+    };
 
     // Wire the cpal stream callbacks to the engine's ring ports. Keep the streams
     // in scope for the session; dropping them stops the audio.
@@ -80,21 +126,18 @@ fn main() -> Result<()> {
         _ => None,
     };
 
-    wait_for_stop(config.duration)?;
+    match output {
+        OutputMode::Tui => tui::run(&engine, &info, config.duration)?,
+        _ => {
+            log_summary(&info);
+            run_session(&engine, config.duration)?;
+        }
+    }
 
     drop(cap_stream);
     drop(play_stream);
     let stats = engine.stop()?;
-    println!("stopped.");
-    if capture.is_some() {
-        println!("  send: {} packets", stats.packets_sent);
-    }
-    if playback.is_some() {
-        println!(
-            "  recv: {} packets, {} gap frames, {} late/dup dropped",
-            stats.packets_received, stats.gap_frames, stats.dropped_late
-        );
-    }
+    report_final(output, capture.is_some(), playback.is_some(), &stats);
     Ok(())
 }
 
@@ -115,38 +158,72 @@ fn with_default_port(spec: &str) -> String {
     }
 }
 
-fn print_summary(
-    config: &Config,
-    capture: &Option<Device>,
-    playback: &Option<Device>,
-    engine: &Engine,
-    peer: Option<std::net::SocketAddr>,
-) -> Result<()> {
-    let mode = match (capture.is_some(), playback.is_some()) {
+fn mode_label(capture: &Option<Device>, playback: &Option<Device>) -> &'static str {
+    match (capture.is_some(), playback.is_some()) {
         (true, true) => "full duplex",
         (true, false) => "send-only",
         (false, true) => "receive-only",
         (false, false) => unreachable!("guarded above"),
-    };
-    println!("vox: {mode}");
-    println!("  capture:  {}", describe_device(capture));
-    println!("  playback: {}", describe_device(playback));
-    if let Some(peer) = peer {
-        println!("  peer:     {peer}");
     }
-    println!("  bind:     {}", engine.local_addr()?);
-    println!(
-        "  codec:    {} bps, jitter {} ms, fec={}, dtx={}, expected_loss={}%",
-        config.bitrate, config.jitter_ms, config.fec, config.dtx, config.expected_loss
-    );
-    if config.fec || config.dtx {
-        println!("  note: fec/dtx are parsed but take effect at M7.");
-    }
-    Ok(())
 }
 
-/// Block until Ctrl+C / SIGINT / SIGTERM, or until `duration` elapses.
-fn wait_for_stop(duration: Option<u64>) -> Result<()> {
+fn log_summary(info: &SessionInfo) {
+    info!("vox {} — {}", env!("CARGO_PKG_VERSION"), info.mode);
+    info!("capture  {}", info.capture);
+    info!("playback {}", info.playback);
+    if let Some(peer) = info.peer {
+        info!("sending to {peer}");
+    }
+    info!("listening {}", info.bind);
+    info!(
+        "codec {} bps, jitter {} ms, fec={}, dtx={}",
+        info.bitrate, info.jitter_ms, info.fec, info.dtx
+    );
+    if info.fec || info.dtx {
+        info!("note: fec/dtx are parsed but take effect at M7");
+    }
+}
+
+fn report_final(output: OutputMode, sending: bool, receiving: bool, stats: &EngineStats) {
+    let send = format!(
+        "sent {} packets ({} KiB)",
+        stats.packets_sent,
+        stats.bytes_sent / 1024
+    );
+    let recv = format!(
+        "received {} packets ({} KiB), {} gap frames, {} late/dup dropped",
+        stats.packets_received,
+        stats.bytes_received / 1024,
+        stats.gap_frames,
+        stats.dropped_late
+    );
+    match output {
+        // The TUI suppresses the logger; print a plain summary after it restores.
+        OutputMode::Tui => {
+            println!("stopped");
+            if sending {
+                println!("{send}");
+            }
+            if receiving {
+                println!("{recv}");
+            }
+        }
+        OutputMode::Quiet => {}
+        OutputMode::Plain => {
+            info!("stopped");
+            if sending {
+                info!("{send}");
+            }
+            if receiving {
+                info!("{recv}");
+            }
+        }
+    }
+}
+
+/// Block until Ctrl+C / SIGINT / SIGTERM, or until `duration` elapses, emitting a
+/// periodic throughput line and connection-liveness messages.
+fn run_session(engine: &Engine, duration: Option<u64>) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = Arc::clone(&stop);
@@ -154,10 +231,16 @@ fn wait_for_stop(duration: Option<u64>) -> Result<()> {
             .context("install signal handler")?;
     }
     match duration {
-        Some(secs) => println!("running for {secs}s (Ctrl+C to stop early)..."),
-        None => println!("running (Ctrl+C to stop)..."),
+        Some(secs) => info!("running for {secs}s (Ctrl+C to stop early)"),
+        None => info!("running (Ctrl+C to stop)"),
     }
     let deadline = duration.map(|secs| Instant::now() + Duration::from_secs(secs));
+
+    let mut last = engine.stats();
+    let mut last_report = Instant::now();
+    let mut peer_seen = last.packets_received > 0;
+    let mut warned_silent = false;
+
     while !stop.load(Ordering::SeqCst) {
         if let Some(deadline) = deadline {
             if Instant::now() >= deadline {
@@ -165,8 +248,49 @@ fn wait_for_stop(duration: Option<u64>) -> Result<()> {
             }
         }
         thread::sleep(Duration::from_millis(100));
+
+        if last_report.elapsed() < REPORT_INTERVAL {
+            continue;
+        }
+        let now = engine.stats();
+        let secs = last_report.elapsed().as_secs_f64();
+        let recv_delta = now.packets_received - last.packets_received;
+
+        if now.packets_received > 0 && !peer_seen {
+            peer_seen = true;
+            info!("peer connected");
+        }
+        if peer_seen {
+            if recv_delta == 0 && !warned_silent {
+                warn!("peer silent (no packets in last {secs:.0}s)");
+                warned_silent = true;
+            } else if recv_delta > 0 {
+                warned_silent = false;
+            }
+        }
+
+        info!(
+            "tx {:.0} kbps {:.0} pkt/s | rx {:.0} kbps {:.0} pkt/s | gaps {} drops {}",
+            kbps(now.bytes_sent - last.bytes_sent, secs),
+            (now.packets_sent - last.packets_sent) as f64 / secs,
+            kbps(now.bytes_received - last.bytes_received, secs),
+            recv_delta as f64 / secs,
+            now.gap_frames,
+            now.dropped_late
+        );
+
+        last = now;
+        last_report = Instant::now();
     }
     Ok(())
+}
+
+pub(crate) fn kbps(bytes: u64, secs: f64) -> f64 {
+    if secs <= 0.0 {
+        0.0
+    } else {
+        bytes as f64 * 8.0 / 1000.0 / secs
+    }
 }
 
 fn build_capture(device: &Device, channels: u16, mut sink: CaptureSink) -> Result<Stream> {
@@ -175,7 +299,7 @@ fn build_capture(device: &Device, channels: u16, mut sink: CaptureSink) -> Resul
             &device::stream_config(channels),
             // SACRED: non-blocking ring push only.
             move |data: &[f32], _| sink.push(data),
-            move |err| eprintln!("capture stream error: {err}"),
+            move |err| error!("capture stream: {err}"),
             None,
         )
         .context("build capture stream")?;
@@ -189,7 +313,7 @@ fn build_playback(device: &Device, channels: u16, mut source: PlaybackSource) ->
             &device::stream_config(channels),
             // SACRED: non-blocking ring pop (+ silence on underrun) only.
             move |data: &mut [f32], _| source.fill(data),
-            move |err| eprintln!("playback stream error: {err}"),
+            move |err| error!("playback stream: {err}"),
             None,
         )
         .context("build playback stream")?;
@@ -201,5 +325,14 @@ fn describe_device(device: &Option<Device>) -> String {
     match device {
         Some(device) => device.name().unwrap_or_else(|_| "<unknown>".to_string()),
         None => "none".to_string(),
+    }
+}
+
+fn channels_label(channels: Option<u16>) -> &'static str {
+    match channels {
+        Some(1) => "  [mono]",
+        Some(2) => "  [stereo]",
+        Some(_) => "  [multi]",
+        None => "",
     }
 }

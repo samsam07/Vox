@@ -56,15 +56,19 @@ Mirror M4 into both directions: four threads, both rings, both machines.
 - Exit: real two-way conversation over LAN.
 - Applies: DESIGN §2 entire.
 
-### M6 — crate split + CLI + config + Apollo integration
-Done in two steps:
-- **M6a (extract):** split into the `vox-core` library + `vox` binary workspace
-  (DESIGN §11) as a behaviour-preserving refactor — engine into `vox-core`, cpal +
-  the temporary env driver into `vox`. Exit: the M5 duplex test still passes.
-- **M6b (CLI):** wrap the engine in the locked CLI; TOML config mode with flag
-  overrides; wire Apollo command-on-connect / command-on-disconnect hooks.
-- Exit: vox starts/stops with a Moonlight session from a one-liner or TOML.
-- `[CRYSTALLIZE]` VOX_DEFAULT_PORT value; TOML default values (DESIGN §6, §7).
+### M6 — CLI + config + Apollo + UX
+Split into the `vox-core` library + `vox` binary workspace (DESIGN §11). Wrap the
+engine in the locked CLI (`vox <config.toml>` / `vox --peer …`) with TOML config and
+flag-override precedence; wire Apollo connect/disconnect hooks (run-until-signal —
+see docs/APOLLO.md). UX: presentation modes (`--output quiet|plain|tui`), clear
+functional logging (`-v`/`-vv` for technical detail), a live ratatui dashboard
+(throughput / loss / jitter / uptime), and niceties (`--help` examples, richer
+`--list-devices`, `--print-config`, short flags, broken-pipe robustness). The engine
+exposes live metrics (byte counters + a non-consuming stats snapshot) for the plain
+status and the TUI.
+- Exit: vox starts/stops with a Moonlight session from a one-liner or TOML; the
+  three output modes work; verified machine-to-machine.
+- `[CRYSTALLIZE]` VOX_DEFAULT_PORT = 9680; TOML default values (DESIGN §6, §7).
 - **MVP COMPLETE — usable daily for its real purpose.**
 
 ---

@@ -4,10 +4,37 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+const EXAMPLES: &str = "\
+EXAMPLES:
+  vox --list-devices
+  vox --peer 192.168.1.50                       # full duplex, default devices
+  vox --peer 192.168.1.50 --playback none       # send-only (mic -> peer)
+  vox --capture none --bind 9680                # receive-only (peer -> speakers)
+  vox host.toml                                 # config file
+  vox host.toml --output tui                    # with the live dashboard
+";
+
+/// How vox presents itself while running.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Errors only — for headless / Apollo use.
+    Quiet,
+    /// Clear functional output (default).
+    #[default]
+    Plain,
+    /// Live full-screen dashboard (requires a terminal).
+    Tui,
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "vox", version, about = "Headless bidirectional voice pipe over LAN UDP")]
+#[command(
+    name = "vox",
+    version,
+    about = "Headless bidirectional voice pipe over LAN UDP",
+    after_help = EXAMPLES
+)]
 pub struct Cli {
     /// TOML config file. Flags override its values.
     pub config: Option<PathBuf>,
@@ -16,13 +43,25 @@ pub struct Cli {
     #[arg(long)]
     pub list_devices: bool,
 
+    /// Print the resolved configuration and exit.
+    #[arg(long)]
+    pub print_config: bool,
+
+    /// Output mode.
+    #[arg(short, long, value_enum, default_value_t = OutputMode::Plain)]
+    pub output: OutputMode,
+
+    /// Increase verbosity: -v technical detail, -vv trace.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
     // --- Connection ---
     /// Send target, host[:port]. Port omitted → 9680.
-    #[arg(long)]
+    #[arg(short, long)]
     pub peer: Option<String>,
     /// Local UDP receive port (omitted → 9680 when receiving; send-only uses an
     /// ephemeral source port).
-    #[arg(long)]
+    #[arg(short, long)]
     pub bind: Option<u16>,
 
     // --- Devices (none | default | "exact name") ---

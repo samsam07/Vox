@@ -3,6 +3,8 @@
 //! role, never network direction: `capture` is the local record (input) device,
 //! `playback` is the local play (output) device.
 
+use std::io::Write;
+
 use anyhow::{anyhow, bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, Device, Host, SampleRate, StreamConfig};
@@ -27,20 +29,25 @@ impl Role {
     }
 }
 
-/// Print all capture (input) and playback (output) devices with indices + names,
-/// marking each host default.
+/// Print all capture (input) and playback (output) devices with indices, names,
+/// native config, and a `[default]` marker. Writes to stdout, tolerating a closed
+/// pipe (`vox --list-devices | head`).
 pub fn list_devices(host: &Host) -> Result<()> {
     let cap_default = host.default_input_device().and_then(|d| d.name().ok());
-    println!("capture (input) devices:");
-    print_devices(host.input_devices()?, cap_default.as_deref());
+    line("capture (input) devices:");
+    print_devices(host.input_devices()?, Role::Capture, cap_default.as_deref());
 
     let pb_default = host.default_output_device().and_then(|d| d.name().ok());
-    println!("playback (output) devices:");
-    print_devices(host.output_devices()?, pb_default.as_deref());
+    line("playback (output) devices:");
+    print_devices(
+        host.output_devices()?,
+        Role::Playback,
+        pb_default.as_deref(),
+    );
     Ok(())
 }
 
-fn print_devices(devices: impl Iterator<Item = Device>, default_name: Option<&str>) {
+fn print_devices(devices: impl Iterator<Item = Device>, role: Role, default_name: Option<&str>) {
     let mut any = false;
     for (index, device) in devices.enumerate() {
         any = true;
@@ -50,11 +57,35 @@ fn print_devices(devices: impl Iterator<Item = Device>, default_name: Option<&st
         } else {
             ""
         };
-        println!("  [{index}] {name}{marker}");
+        line(&format!(
+            "  [{index}] {name}  {}{marker}",
+            capability(&device, role)
+        ));
     }
     if !any {
-        println!("  (none)");
+        line("  (none)");
     }
+}
+
+fn capability(device: &Device, role: Role) -> String {
+    let config = match role {
+        Role::Capture => device.default_input_config(),
+        Role::Playback => device.default_output_config(),
+    };
+    match config {
+        Ok(c) => format!(
+            "[{} Hz, {} ch, {:?}]",
+            c.sample_rate().0,
+            c.channels(),
+            c.sample_format()
+        ),
+        Err(_) => "[config unavailable]".to_string(),
+    }
+}
+
+/// Write one line to stdout, ignoring a closed pipe (no panic).
+fn line(s: &str) {
+    let _ = writeln!(std::io::stdout(), "{s}");
 }
 
 /// Resolve a device spec to a concrete device. Spec strings mirror DESIGN §6:

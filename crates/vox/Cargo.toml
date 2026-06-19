@@ -23,6 +23,9 @@ toml = "0.8"
 # Cross-platform stop signal (Ctrl+C / SIGINT / SIGTERM / Windows console close).
 ctrlc = "3"
 
+# Live TUI dashboard (--output tui). Re-exports crossterm for events/backend.
+ratatui = "0.29"
+
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"

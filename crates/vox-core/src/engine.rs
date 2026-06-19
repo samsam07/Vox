@@ -71,13 +71,19 @@ pub struct Engine {
     receiver: Option<receive::ReceiveThread>,
 }
 
-/// Counters gathered at shutdown.
-#[derive(Default)]
+/// Cumulative engine counters. Read live via [`Engine::stats`] or final via
+/// [`Engine::stop`].
+#[derive(Default, Clone, Copy)]
 pub struct EngineStats {
     pub packets_sent: u64,
+    pub bytes_sent: u64,
     pub packets_received: u64,
+    pub bytes_received: u64,
     pub gap_frames: u64,
     pub dropped_late: u64,
+    /// Current jitter-buffer occupancy and capacity, in samples.
+    pub jitter_fill: u64,
+    pub jitter_capacity: u64,
 }
 
 impl Engine {
@@ -117,7 +123,8 @@ impl Engine {
                 // Prefill a look-ahead cushion so playback starts smoothly and
                 // short-term jitter is absorbed (the buffer FEC relies on at M7).
                 producer.push_slice(&vec![0.0f32; capacity / 2]);
-                let thread = receive::spawn(producer, Arc::clone(&socket), channels as usize)?;
+                let thread =
+                    receive::spawn(producer, Arc::clone(&socket), channels as usize, capacity)?;
                 (Some(thread), Some(PlaybackSource { consumer }))
             }
             None => (None, None),
@@ -138,18 +145,39 @@ impl Engine {
         self.socket.local_addr()
     }
 
+    /// A live snapshot of the cumulative counters (non-consuming).
+    pub fn stats(&self) -> EngineStats {
+        let mut stats = EngineStats::default();
+        if let Some(sender) = &self.sender {
+            stats.packets_sent = sender.packets.load(Ordering::Relaxed);
+            stats.bytes_sent = sender.bytes.load(Ordering::Relaxed);
+        }
+        if let Some(receiver) = &self.receiver {
+            stats.packets_received = receiver.stats.received.load(Ordering::Relaxed);
+            stats.bytes_received = receiver.stats.bytes.load(Ordering::Relaxed);
+            stats.gap_frames = receiver.stats.gap_frames.load(Ordering::Relaxed);
+            stats.dropped_late = receiver.stats.dropped_late.load(Ordering::Relaxed);
+            stats.jitter_fill = receiver.stats.jitter_fill.load(Ordering::Relaxed);
+            stats.jitter_capacity = receiver.capacity as u64;
+        }
+        stats
+    }
+
     /// Stop the send/receive threads and return the final stats.
     pub fn stop(self) -> Result<EngineStats> {
         let mut stats = EngineStats::default();
         if let Some(sender) = self.sender {
             let packets = Arc::clone(&sender.packets);
+            let bytes = Arc::clone(&sender.bytes);
             sender.stop_and_join()?;
             stats.packets_sent = packets.load(Ordering::Relaxed);
+            stats.bytes_sent = bytes.load(Ordering::Relaxed);
         }
         if let Some(receiver) = self.receiver {
             let counters = Arc::clone(&receiver.stats);
             receiver.stop_and_join()?;
             stats.packets_received = counters.received.load(Ordering::Relaxed);
+            stats.bytes_received = counters.bytes.load(Ordering::Relaxed);
             stats.gap_frames = counters.gap_frames.load(Ordering::Relaxed);
             stats.dropped_late = counters.dropped_late.load(Ordering::Relaxed);
         }

@@ -27,7 +27,8 @@ Each instance runs four threads: a capture callback and a playback callback
 (audio I/O), plus a send thread (encode → UDP) and a receive thread (UDP →
 decode). A lock-free ring buffer hands audio off the real-time callbacks, and a
 small jitter buffer on the receive side smooths out network timing. Opus runs at
-48 kHz, 20 ms frames, mono, with in-band FEC for graceful packet loss.
+48 kHz, 20 ms frames, mono; in-band FEC for graceful packet loss is part of the
+design and is enabled in Phase 2.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the full architecture and rationale.
 
@@ -47,7 +48,12 @@ vox --peer <host[:port]> [--bind <port>] [--capture <dev>] [--playback <dev>]
 
 `--capture` / `--playback` name the *local* device to record from / play to.
 Accepts `default`, `none` (disable that direction), or a device name. Omitted
-means `default`. Port defaults apply when omitted.
+means `default`. Port defaults to 9680 when omitted.
+
+Run `vox --list-devices` to see exact device names (`--capture`/`--playback`
+match them exactly). Other handy flags: `--output tui` for a live dashboard
+(throughput, loss, jitter), `--output quiet` for silent headless runs, `-v` for
+technical logs, and `--print-config` to dump the resolved settings.
 
 Example — Windows host (VB-Cable A = desktop audio, B = virtual mic):
 
@@ -79,9 +85,10 @@ Cross-compiling from Fedora is a later-phase convenience.
 
 ## Status
 
-Early development. Tracking toward a Phase 1 MVP (usable daily); see
-[`docs/PLAN.md`](docs/PLAN.md) for milestones. Not yet production-hardened for
-third parties.
+Phase 1 MVP complete — usable daily for its purpose: full-duplex LAN voice with a
+clap CLI + TOML config and a live TUI. Phase 2 (FEC, reconnection robustness,
+non-48k resampling, Linux client) and packaging for third parties come next; see
+[`docs/PLAN.md`](docs/PLAN.md) for milestones.
 
 ## Scope
 

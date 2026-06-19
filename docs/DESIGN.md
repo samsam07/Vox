@@ -66,7 +66,9 @@ shared mutability.
     require a channel field in the header or a handshake the connectionless model
     lacks. Decision established empirically at M1 (VB-Cable is stereo-only here).
 - FEC enabled (in-band). Encoder: FEC on, expected-packet-loss ~5–10%
-  (justified by WiFi on the client leg), DTX on.
+  (justified by WiFi on the client leg), DTX on. This is the end-state; `fec`/`dtx`
+  are parsed from config but default off and are not acted on until M7 wires the
+  FEC encode/decode path (see §7).
 - FEC ↔ jitter buffer are coupled: FEC reconstructs a lost frame N from a
   redundant copy carried in frame N+1, which only works if the jitter buffer held
   N+1 long enough. The ~40–60 ms buffer provides that look-ahead.
@@ -121,6 +123,11 @@ they belong to:
 
 Rationale: bitrate/FEC/DTX are encoder settings on the send path; playback has no
 bitrate (decode is parameter-free). Naming them per-device would be a category error.
+
+Operational flags (tooling, not audio config; added at M6c): `--list-devices`,
+`--print-config`, `--output <quiet|plain|tui>` (default `plain`), `-v`/`-vv`
+(verbosity), `--duration <secs>` (run for N seconds then exit; default: until a
+stop signal).
 
 ## 7. TOML schema (crystallized at M6)
 

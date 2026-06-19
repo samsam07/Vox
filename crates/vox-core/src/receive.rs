@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use anyhow::{bail, Context, Result};
-use ringbuf::traits::Producer;
+use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
 use crate::audio::{FRAME, MAX_PACKET};
@@ -27,14 +27,19 @@ const MAX_GAP_FRAMES: u32 = 50;
 #[derive(Default)]
 pub(crate) struct Stats {
     pub(crate) received: AtomicU64,
+    pub(crate) bytes: AtomicU64,
     pub(crate) gap_frames: AtomicU64,
     pub(crate) dropped_late: AtomicU64,
+    /// Current jitter-buffer occupancy in samples (instantaneous, not cumulative).
+    pub(crate) jitter_fill: AtomicU64,
 }
 
 pub(crate) struct ReceiveThread {
     thread: JoinHandle<Result<()>>,
     stop: Arc<AtomicBool>,
     pub(crate) stats: Arc<Stats>,
+    /// Jitter-buffer capacity in samples (for reporting fill as a fraction).
+    pub(crate) capacity: usize,
 }
 
 impl ReceiveThread {
@@ -51,6 +56,7 @@ pub(crate) fn spawn(
     producer: HeapProd<f32>,
     socket: Arc<UdpSocket>,
     channels: usize,
+    capacity: usize,
 ) -> Result<ReceiveThread> {
     let decoder = opus::Decoder::new(crate::audio::RATE, opus::Channels::Mono)
         .context("create opus decoder")?;
@@ -65,6 +71,7 @@ pub(crate) fn spawn(
         thread,
         stop,
         stats,
+        capacity,
     })
 }
 
@@ -93,6 +100,7 @@ fn recv_loop(
             None => continue, // too short to be ours
         };
         stats.received.fetch_add(1, Ordering::Relaxed);
+        stats.bytes.fetch_add(n as u64, Ordering::Relaxed);
 
         if let Some(exp) = expected {
             let gap = pkt.seq.wrapping_sub(exp);
@@ -110,8 +118,18 @@ fn recv_loop(
             // gap > MAX_GAP_FRAMES: discontinuity — resync (decode this frame, no fill).
         }
 
-        push_frame(&mut decoder, pkt.payload, &mut decoded, channels, &mut out, &mut producer)?;
+        push_frame(
+            &mut decoder,
+            pkt.payload,
+            &mut decoded,
+            channels,
+            &mut out,
+            &mut producer,
+        )?;
         expected = Some(pkt.seq.wrapping_add(1));
+        stats
+            .jitter_fill
+            .store(producer.occupied_len() as u64, Ordering::Relaxed);
     }
     Ok(())
 }

@@ -19,6 +19,7 @@ pub(crate) struct SendThread {
     thread: JoinHandle<Result<()>>,
     stop: Arc<AtomicBool>,
     pub(crate) packets: Arc<AtomicU64>,
+    pub(crate) bytes: Arc<AtomicU64>,
 }
 
 impl SendThread {
@@ -46,27 +47,55 @@ pub(crate) fn spawn(
 
     let stop = Arc::new(AtomicBool::new(false));
     let packets = Arc::new(AtomicU64::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
     let thread = {
         let stop = Arc::clone(&stop);
         let packets = Arc::clone(&packets);
-        thread::spawn(move || send_loop(consumer, socket, peer, encoder, channels, stop, packets))
+        let bytes = Arc::clone(&bytes);
+        thread::spawn(move || {
+            send_loop(SendLoop {
+                consumer,
+                socket,
+                peer,
+                encoder,
+                channels,
+                stop,
+                packets,
+                bytes,
+            })
+        })
     };
     Ok(SendThread {
         thread,
         stop,
         packets,
+        bytes,
     })
 }
 
-fn send_loop(
-    mut consumer: HeapCons<f32>,
+/// The send thread's owned state (one struct so the worker takes a single arg).
+struct SendLoop {
+    consumer: HeapCons<f32>,
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
-    mut encoder: opus::Encoder,
+    encoder: opus::Encoder,
     channels: usize,
     stop: Arc<AtomicBool>,
     packets: Arc<AtomicU64>,
-) -> Result<()> {
+    bytes: Arc<AtomicU64>,
+}
+
+fn send_loop(ctx: SendLoop) -> Result<()> {
+    let SendLoop {
+        mut consumer,
+        socket,
+        peer,
+        mut encoder,
+        channels,
+        stop,
+        packets,
+        bytes: sent_bytes,
+    } = ctx;
     let mut read = vec![0.0f32; 4096];
     let mut interleaved: Vec<f32> = Vec::with_capacity(8192); // < channels leftover
     let mut mono: Vec<f32> = Vec::with_capacity(FRAME * 4); // < FRAME leftover
@@ -103,6 +132,7 @@ fn send_loop(
             seq = seq.wrapping_add(1);
             timestamp = timestamp.wrapping_add(FRAME as u32);
             packets.fetch_add(1, Ordering::Relaxed);
+            sent_bytes.fetch_add((packet::HEADER_LEN + bytes) as u64, Ordering::Relaxed);
             mono.drain(..FRAME);
         }
     }
