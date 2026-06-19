@@ -34,6 +34,11 @@ pub(crate) struct Stats {
     /// Cumulative jitter-buffer overruns: 20 ms frame pushes truncated because the
     /// ring was full (decoded audio dropped → glitches).
     pub(crate) overruns: AtomicU64,
+    /// In-order frames dropped to shed a persistently-high buffer (peer clock running
+    /// ahead). The recentering stopgap for clock drift (DESIGN §3).
+    pub(crate) recenter_drops: AtomicU64,
+    /// Frames repeated to hold up a persistently-low buffer (peer clock lagging).
+    pub(crate) recenter_inserts: AtomicU64,
     /// Current jitter-buffer occupancy in samples (instantaneous, not cumulative).
     pub(crate) jitter_fill: AtomicU64,
 }
@@ -69,7 +74,7 @@ pub(crate) fn spawn(
     let thread = {
         let stop = Arc::clone(&stop);
         let stats = Arc::clone(&stats);
-        thread::spawn(move || recv_loop(producer, socket, decoder, channels, stop, stats))
+        thread::spawn(move || recv_loop(producer, socket, decoder, channels, capacity, stop, stats))
     };
     Ok(ReceiveThread {
         thread,
@@ -84,17 +89,28 @@ fn recv_loop(
     socket: Arc<UdpSocket>,
     decoder: opus::Decoder,
     channels: usize,
+    capacity: usize,
     stop: Arc<AtomicBool>,
     stats: Arc<Stats>,
 ) -> Result<()> {
     let mut buf = vec![0u8; packet::HEADER_LEN + MAX_PACKET];
-    let mut receiver = Receiver::new(decoder, channels);
+    let mut receiver = Receiver::new(decoder, channels, capacity);
 
     while !stop.load(Ordering::Acquire) {
         let n = match socket.recv_from(&mut buf) {
             Ok((n, _from)) => n,
-            // Read timeout fired — loop back to re-check the stop flag.
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
+            // Transient: a read timeout, or — on Windows — a ConnectionReset that a
+            // prior send drew as an ICMP port-unreachable while the peer was down.
+            // Loop back to re-check the stop flag and keep receiving (so the peer
+            // restarting never kills this side).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset
+                ) =>
+            {
+                continue
+            }
             Err(e) => return Err(e).context("udp recv"),
         };
         let pkt = match packet::parse(&buf[..n]) {
@@ -126,22 +142,33 @@ struct Receiver {
     decoded: Vec<f32>,
     /// Interleaved upmix scratch (one frame × `channels`).
     out: Vec<f32>,
+    /// Recenter down (drop a frame) when occupancy is at/above this, in samples.
+    high_watermark: usize,
+    /// Recenter up (repeat a frame) when occupancy is at/below this, in samples.
+    low_watermark: usize,
 }
 
 impl Receiver {
-    fn new(decoder: opus::Decoder, channels: usize) -> Self {
+    /// `capacity` is the jitter ring's sample capacity; recentering acts at the
+    /// outer quarters (≥¾ full → drop, ≤¼ full → hold) so it leaves the middle
+    /// half — where the buffer normally sits and short-term jitter lives — alone.
+    fn new(decoder: opus::Decoder, channels: usize, capacity: usize) -> Self {
         Receiver {
             decoder,
             channels,
             expected: None,
             decoded: vec![0.0f32; FRAME],
             out: Vec::with_capacity(FRAME * channels),
+            high_watermark: capacity * 3 / 4,
+            low_watermark: capacity / 4,
         }
     }
 
-    /// Handle one parsed, in-sequence-numbered packet: drop it if late/duplicate,
-    /// else conceal any gap (FEC for the last lost frame, PLC for earlier ones) and
-    /// decode this frame, pushing every produced frame into the jitter buffer.
+    /// Handle one parsed packet, using wrap-aware sequence comparison (DESIGN §5) to
+    /// classify it: in order → decode; a short forward gap → conceal (FEC last, PLC
+    /// earlier); a short backward step → late/duplicate, drop; a large jump either
+    /// way → discontinuity, resync. A large *backward* jump means the peer restarted
+    /// its stream (seq reset to 0), so the decoder is reset for a clean slate.
     fn accept(
         &mut self,
         seq: u32,
@@ -150,24 +177,31 @@ impl Receiver {
         stats: &Stats,
     ) -> Result<()> {
         if let Some(exp) = self.expected {
-            let gap = seq.wrapping_sub(exp);
-            if gap >= u32::MAX / 2 {
-                // seq is behind what we expect: a late or duplicate frame — drop.
-                stats.dropped_late.fetch_add(1, Ordering::Relaxed);
-                return Ok(());
-            }
-            if gap > 0 && gap <= MAX_GAP_FRAMES {
-                // Conceal the missing frames. Opus in-band FEC only carries the
-                // single immediately-preceding frame, so PLC the earlier ones and
-                // FEC-reconstruct the last from THIS packet's redundant copy (which
-                // falls back to PLC internally if it carries none) — DESIGN §4.
-                for _ in 0..gap - 1 {
+            let ahead = seq.wrapping_sub(exp);
+            if ahead >= u32::MAX / 2 {
+                // seq is behind what we expect.
+                let behind = exp.wrapping_sub(seq);
+                if behind <= MAX_GAP_FRAMES {
+                    // A genuinely late or duplicate frame — drop it.
+                    stats.dropped_late.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                // A large backward jump: the peer restarted (seq reset). Reset the
+                // decoder so the new stream decodes from a clean slate, then resync.
+                self.decoder.reset_state().context("opus decoder reset")?;
+            } else if (1..=MAX_GAP_FRAMES).contains(&ahead) {
+                // Normal short loss — conceal the missing frames. Opus in-band FEC
+                // only carries the single immediately-preceding frame, so PLC the
+                // earlier ones and FEC-reconstruct the last from THIS packet's
+                // redundant copy (which falls back to PLC if it carries none) — §4.
+                for _ in 0..ahead - 1 {
                     self.decode_plc(producer, stats)?;
                 }
                 self.decode_fec(payload, producer, stats)?;
-                stats.gap_frames.fetch_add(gap as u64, Ordering::Relaxed);
+                stats.gap_frames.fetch_add(ahead as u64, Ordering::Relaxed);
             }
-            // gap > MAX_GAP_FRAMES: discontinuity — resync (decode this frame, no fill).
+            // ahead > MAX_GAP_FRAMES: a large forward jump (long outage) — resync by
+            // decoding this frame with no fill.
         }
 
         self.decode_frame(payload, producer, stats)?;
@@ -175,7 +209,12 @@ impl Receiver {
         Ok(())
     }
 
-    /// Decode the in-order packet normally.
+    /// Decode the in-order packet, applying jitter recentering against clock drift
+    /// (DESIGN §3): if the buffer sits high (peer clock ahead) drop this frame to
+    /// shed the surplus instead of overrunning; if it sits low (peer clock lagging)
+    /// repeat it once to hold the level up. A no-resampler stopgap — occasional
+    /// single-frame correction — that blunts drift glitching until M10. Recentering
+    /// is in-order only; loss concealment (FEC/PLC) always enqueues.
     fn decode_frame(
         &mut self,
         payload: &[u8],
@@ -186,7 +225,16 @@ impl Receiver {
             .decoder
             .decode_float(payload, &mut self.decoded, false)
             .context("opus decode")?;
+        if producer.occupied_len() >= self.high_watermark {
+            // Drop to recenter; the decoder state has still advanced for continuity.
+            stats.recenter_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         self.push(samples, producer, stats);
+        if producer.occupied_len() <= self.low_watermark {
+            self.push(samples, producer, stats);
+            stats.recenter_inserts.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -238,8 +286,22 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
 
-    use ringbuf::traits::{Consumer, Observer, Split};
+    use ringbuf::traits::{Consumer, Observer, Producer, Split};
     use ringbuf::HeapRb;
+
+    /// Build a `Receiver` with explicit watermarks so tests target the recentering
+    /// thresholds directly — or disable recentering with `high = usize::MAX, low = 0`.
+    fn make_receiver(channels: usize, high_watermark: usize, low_watermark: usize) -> Receiver {
+        Receiver {
+            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
+            channels,
+            expected: None,
+            decoded: vec![0.0f32; FRAME],
+            out: Vec::with_capacity(FRAME * channels),
+            high_watermark,
+            low_watermark,
+        }
+    }
 
     /// `n` mono frames of a 440 Hz tone (something with structure for FEC/PLC to
     /// reconstruct, not silence).
@@ -278,13 +340,13 @@ mod tests {
     }
 
     /// Feed sequence-numbered packets to a fresh `Receiver` and return the decoded
-    /// interleaved PCM plus the resulting stats. The ring is oversized so nothing is
-    /// dropped to overrun (we are testing reconstruction, not the buffer's overrun).
+    /// interleaved PCM plus the resulting stats. The ring is oversized and recentering
+    /// is disabled, so output is exactly the reconstruction (no overrun, no drift
+    /// drop/insert) — recentering has its own focused tests below.
     fn run(channels: usize, packets: &[(u32, &[u8])]) -> (Vec<f32>, Stats) {
         let capacity = (packets.len() + MAX_GAP_FRAMES as usize + 8) * FRAME * channels;
         let (mut producer, mut consumer) = HeapRb::<f32>::new(capacity).split();
-        let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
-        let mut receiver = Receiver::new(decoder, channels);
+        let mut receiver = make_receiver(channels, usize::MAX, 0);
         let stats = Stats::default();
         for &(seq, payload) in packets {
             receiver
@@ -383,5 +445,81 @@ mod tests {
 
         assert_eq!(stats.gap_frames.load(Ordering::Relaxed), 0);
         assert_eq!(out.len(), 2 * FRAME); // both real frames, no fill
+    }
+
+    /// A restarted peer resets its sequence to 0; the receiver reads the large
+    /// backward jump as a stream restart and resyncs (decodes) rather than dropping
+    /// every new frame as "late" until the old sequence is reached.
+    #[test]
+    fn peer_restart_resyncs() {
+        let frames = encode(false, &sine_frames(2));
+        let (mut producer, _consumer) = HeapRb::<f32>::new(20 * FRAME).split();
+        let mut rx = make_receiver(1, usize::MAX, 0); // recentering inert
+        let stats = Stats::default();
+
+        // A stream well past MAX_GAP_FRAMES, then the peer restarts at seq 0.
+        rx.accept(1000, frames[0].as_slice(), &mut producer, &stats)
+            .unwrap();
+        let after_first = producer.occupied_len();
+        rx.accept(0, frames[1].as_slice(), &mut producer, &stats)
+            .unwrap();
+
+        // The restart frame was decoded (one more frame enqueued), not dropped.
+        assert_eq!(stats.dropped_late.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.gap_frames.load(Ordering::Relaxed), 0);
+        assert_eq!(producer.occupied_len(), after_first + FRAME);
+    }
+
+    /// A buffer at/above the high watermark sheds the in-order frame instead of
+    /// enqueuing it — recentering down against an over-full buffer (peer clock ahead).
+    #[test]
+    fn recenters_down_when_buffer_high() {
+        let frames = encode(false, &sine_frames(1));
+        let (mut producer, _consumer) = HeapRb::<f32>::new(10 * FRAME).split();
+        producer.push_slice(&vec![0.0f32; 8 * FRAME]); // 80% full, above ¾
+        let mut rx = make_receiver(1, 7 * FRAME, 0);
+        let stats = Stats::default();
+
+        rx.accept(0, frames[0].as_slice(), &mut producer, &stats)
+            .unwrap();
+
+        assert_eq!(stats.recenter_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.recenter_inserts.load(Ordering::Relaxed), 0);
+        assert_eq!(producer.occupied_len(), 8 * FRAME); // frame dropped, level held
+    }
+
+    /// A buffer at/below the low watermark repeats the frame to hold the level up —
+    /// recentering up against a draining buffer (peer clock lagging).
+    #[test]
+    fn recenters_up_when_buffer_low() {
+        let frames = encode(false, &sine_frames(1));
+        let (mut producer, _consumer) = HeapRb::<f32>::new(10 * FRAME).split();
+        let mut rx = make_receiver(1, usize::MAX, 2 * FRAME); // empty start, below ¼
+        let stats = Stats::default();
+
+        rx.accept(0, frames[0].as_slice(), &mut producer, &stats)
+            .unwrap();
+
+        assert_eq!(stats.recenter_inserts.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.recenter_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(producer.occupied_len(), 2 * FRAME); // pushed once, then held once
+    }
+
+    /// In the mid-band, recentering stays idle — normal jitter lives here and must
+    /// not be perturbed.
+    #[test]
+    fn recentering_idle_in_mid_band() {
+        let frames = encode(false, &sine_frames(1));
+        let (mut producer, _consumer) = HeapRb::<f32>::new(10 * FRAME).split();
+        producer.push_slice(&vec![0.0f32; 5 * FRAME]); // 50% full
+        let mut rx = make_receiver(1, 8 * FRAME, 2 * FRAME);
+        let stats = Stats::default();
+
+        rx.accept(0, frames[0].as_slice(), &mut producer, &stats)
+            .unwrap();
+
+        assert_eq!(stats.recenter_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.recenter_inserts.load(Ordering::Relaxed), 0);
+        assert_eq!(producer.occupied_len(), 6 * FRAME); // exactly one frame enqueued
     }
 }

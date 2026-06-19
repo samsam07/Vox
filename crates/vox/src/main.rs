@@ -191,12 +191,16 @@ fn report_final(output: OutputMode, sending: bool, receiving: bool, stats: &Engi
         stats.bytes_sent / 1024
     );
     let recv = format!(
-        "received {} packets ({} KiB), {} gap frames, {} late/dup, {} overruns",
+        "received {} packets ({} KiB), {} gap frames, {} late/dup, {} overruns, \
+         {} recenter (drop {} / hold {})",
         stats.packets_received,
         stats.bytes_received / 1024,
         stats.gap_frames,
         stats.dropped_late,
-        stats.overruns
+        stats.overruns,
+        stats.recenter_drops + stats.recenter_inserts,
+        stats.recenter_drops,
+        stats.recenter_inserts
     );
     match output {
         // The TUI suppresses the logger; print a plain summary after it restores.
@@ -271,14 +275,16 @@ fn run_session(engine: &Engine, duration: Option<u64>) -> Result<()> {
         }
 
         info!(
-            "tx {:.0} kbps {:.0} pkt/s | rx {:.0} kbps {:.0} pkt/s | gaps {} drops {} overruns {}",
+            "tx {:.0} kbps {:.0} pkt/s | rx {:.0} kbps {:.0} pkt/s | gaps {} drops {} overruns {} recenter {}/{}",
             kbps(now.bytes_sent - last.bytes_sent, secs),
             (now.packets_sent - last.packets_sent) as f64 / secs,
             kbps(now.bytes_received - last.bytes_received, secs),
             recv_delta as f64 / secs,
             now.gap_frames,
             now.dropped_late,
-            now.overruns
+            now.overruns,
+            now.recenter_drops,
+            now.recenter_inserts
         );
 
         last = now;

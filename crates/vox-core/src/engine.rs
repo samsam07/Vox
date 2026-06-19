@@ -89,6 +89,10 @@ pub struct EngineStats {
     pub dropped_late: u64,
     /// Cumulative jitter-buffer overruns (frames dropped because the ring was full).
     pub overruns: u64,
+    /// Cumulative recentering corrections against clock drift (DESIGN §3): frames
+    /// dropped when the buffer ran high, frames repeated when it ran low.
+    pub recenter_drops: u64,
+    pub recenter_inserts: u64,
     /// Current jitter-buffer occupancy and capacity, in samples.
     pub jitter_fill: u64,
     pub jitter_capacity: u64,
@@ -171,6 +175,8 @@ impl Engine {
             stats.gap_frames = receiver.stats.gap_frames.load(Ordering::Relaxed);
             stats.dropped_late = receiver.stats.dropped_late.load(Ordering::Relaxed);
             stats.overruns = receiver.stats.overruns.load(Ordering::Relaxed);
+            stats.recenter_drops = receiver.stats.recenter_drops.load(Ordering::Relaxed);
+            stats.recenter_inserts = receiver.stats.recenter_inserts.load(Ordering::Relaxed);
             stats.jitter_fill = receiver.stats.jitter_fill.load(Ordering::Relaxed);
             stats.jitter_capacity = receiver.capacity as u64;
         }
@@ -195,6 +201,8 @@ impl Engine {
             stats.gap_frames = counters.gap_frames.load(Ordering::Relaxed);
             stats.dropped_late = counters.dropped_late.load(Ordering::Relaxed);
             stats.overruns = counters.overruns.load(Ordering::Relaxed);
+            stats.recenter_drops = counters.recenter_drops.load(Ordering::Relaxed);
+            stats.recenter_inserts = counters.recenter_inserts.load(Ordering::Relaxed);
         }
         Ok(stats)
     }

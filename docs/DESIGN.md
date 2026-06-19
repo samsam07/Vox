@@ -44,10 +44,14 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
   this adaptive; until then the default is sized for the common Windows/WiFi case,
   not the best case.)
   - Overrun → drop. Underrun → insert silence / Opus PLC frame.
-  - Handles short-term network jitter. Does NOT handle long-term clock drift
+  - Handles short-term network jitter. Does NOT fully handle long-term clock drift
     between the independent capture/playback/peer clocks — over a long session the
-    buffer slowly fills or drains, causing an occasional audible blip. Accepted for
-    MVP. `[PHASE-2]` drift compensation (resampling) fixes it.
+    buffer slowly fills or drains. M8 adds a recentering stopgap: the receive thread
+    drops one in-order frame when occupancy sits high (≥¾) and repeats one when it
+    sits low (≤¼) — no resampler, just an occasional single-frame correction on the
+    in-order path (loss concealment is never dropped). This blunts the drift
+    glitching but coarsely (a 20 ms skip/repeat); `[PHASE-2]` M10 replaces it with
+    smooth resampling-based drift compensation.
 
 Single-owner discipline is enforced by the borrow checker. Do not defeat it with
 shared mutability.
@@ -89,7 +93,12 @@ UDP datagram = small header + Opus payload.
 - Sequence number (2–4 bytes) — drives gap detection for jitter ordering and FEC.
 - Crystallized at M4 — 8-byte big-endian (network order) header, then payload:
   - bytes 0..4: `seq` — u32, increments by 1 per 20 ms frame. Drives gap detection
-    and ordering; wrap-aware comparison (never wraps in practice: ~2.7 years).
+    and ordering; wrap-aware comparison (never wraps in practice: ~2.7 years). A
+    short forward gap is concealed and a short backward step is a late/duplicate
+    drop; a large jump either way is a discontinuity that resyncs — a large backward
+    one specifically means the peer restarted (seq reset), so the decoder is reset
+    too (M8 reconnection robustness). Transient socket errors from a peer being down
+    (e.g. ICMP→ConnectionReset on Windows) are tolerated, not fatal, on both threads.
   - bytes 4..8: `timestamp` — u32, sample count of the frame's first sample
     (increments by 960). Carried for Phase-2 clock-drift/playout work; the MVP
     receiver does not consume it.

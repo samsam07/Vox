@@ -200,11 +200,21 @@ fn draw(
         Color::Red
     };
     let overrun_color = (stats.overruns > 0).then_some(Color::Red);
+    let recenter = stats.recenter_drops + stats.recenter_inserts;
+    let recenter_color = (recenter > 0).then_some(Color::Yellow);
     let quality = Paragraph::new(vec![
         qline("loss", format!("{loss:.1}%"), Some(lcolor)),
         qline("gaps", stats.gap_frames.to_string(), None),
         qline("drops", stats.dropped_late.to_string(), None),
         qline("overrun", stats.overruns.to_string(), overrun_color),
+        qline(
+            "recenter",
+            format!(
+                "{recenter}  (drop {} / hold {})",
+                stats.recenter_drops, stats.recenter_inserts
+            ),
+            recenter_color,
+        ),
     ])
     .block(rounded("Quality"));
     frame.render_widget(quality, quality_a);

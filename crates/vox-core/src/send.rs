@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use log::debug;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
@@ -130,6 +131,8 @@ fn send_loop(ctx: SendLoop) -> Result<()> {
     let mut datagram = vec![0u8; packet::HEADER_LEN + MAX_PACKET];
     let mut seq: u32 = 0;
     let mut timestamp: u32 = 0;
+    // Edge-trigger for send-failure logging (peer down): log on enter/recover only.
+    let mut send_failing = false;
 
     while !stop.load(Ordering::Acquire) {
         let n = consumer.pop_slice(&mut read);
@@ -153,14 +156,30 @@ fn send_loop(ctx: SendLoop) -> Result<()> {
                 .encode_float(&mono[..FRAME], &mut datagram[packet::HEADER_LEN..])
                 .context("opus encode")?;
             packet::write_header(seq, timestamp, &mut datagram[..packet::HEADER_LEN]);
-            socket
-                .send_to(&datagram[..packet::HEADER_LEN + bytes], peer)
-                .context("udp send")?;
+            match socket.send_to(&datagram[..packet::HEADER_LEN + bytes], peer) {
+                Ok(_) => {
+                    if send_failing {
+                        debug!("udp send recovered");
+                        send_failing = false;
+                    }
+                    packets.fetch_add(1, Ordering::Relaxed);
+                    sent_bytes.fetch_add((packet::HEADER_LEN + bytes) as u64, Ordering::Relaxed);
+                }
+                // The peer being down/restarting draws ICMP that surfaces as a send
+                // error (e.g. ConnectionReset on Windows). Drop this frame but keep
+                // the thread alive so the stream resumes when the peer returns — UDP
+                // is lossy and a restarted peer resyncs from our later packets. Don't
+                // count it as sent.
+                Err(e) => {
+                    if !send_failing {
+                        debug!("udp send failing (peer unreachable?): {e}");
+                        send_failing = true;
+                    }
+                }
+            }
 
             seq = seq.wrapping_add(1);
             timestamp = timestamp.wrapping_add(FRAME as u32);
-            packets.fetch_add(1, Ordering::Relaxed);
-            sent_bytes.fetch_add((packet::HEADER_LEN + bytes) as u64, Ordering::Relaxed);
             mono.drain(..FRAME);
         }
     }
