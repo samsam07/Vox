@@ -30,6 +30,9 @@ pub(crate) struct Stats {
     pub(crate) bytes: AtomicU64,
     pub(crate) gap_frames: AtomicU64,
     pub(crate) dropped_late: AtomicU64,
+    /// Cumulative jitter-buffer overruns: 20 ms frame pushes truncated because the
+    /// ring was full (decoded audio dropped → glitches).
+    pub(crate) overruns: AtomicU64,
     /// Current jitter-buffer occupancy in samples (instantaneous, not cumulative).
     pub(crate) jitter_fill: AtomicU64,
 }
@@ -111,14 +114,16 @@ fn recv_loop(
             }
             if gap > 0 && gap <= MAX_GAP_FRAMES {
                 for _ in 0..gap {
-                    push_silence(channels, &mut out, &mut producer);
+                    if push_silence(channels, &mut out, &mut producer) > 0 {
+                        stats.overruns.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 stats.gap_frames.fetch_add(gap as u64, Ordering::Relaxed);
             }
             // gap > MAX_GAP_FRAMES: discontinuity — resync (decode this frame, no fill).
         }
 
-        push_frame(
+        let dropped = push_frame(
             &mut decoder,
             pkt.payload,
             &mut decoded,
@@ -126,6 +131,9 @@ fn recv_loop(
             &mut out,
             &mut producer,
         )?;
+        if dropped > 0 {
+            stats.overruns.fetch_add(1, Ordering::Relaxed);
+        }
         expected = Some(pkt.seq.wrapping_add(1));
         stats
             .jitter_fill
@@ -134,7 +142,8 @@ fn recv_loop(
     Ok(())
 }
 
-/// Decode one Opus frame to mono, upmix to `channels`, and enqueue it.
+/// Decode one Opus frame to mono, upmix to `channels`, and enqueue it. Returns the
+/// number of samples dropped if the jitter buffer was full (overrun, DESIGN §3).
 fn push_frame(
     decoder: &mut opus::Decoder,
     payload: &[u8],
@@ -142,7 +151,7 @@ fn push_frame(
     channels: usize,
     out: &mut Vec<f32>,
     producer: &mut HeapProd<f32>,
-) -> Result<()> {
+) -> Result<usize> {
     let samples = decoder
         .decode_float(payload, decoded, false)
         .context("opus decode")?;
@@ -152,13 +161,15 @@ fn push_frame(
             out.push(sample);
         }
     }
-    producer.push_slice(out); // jitter-buffer overrun -> drop remainder (DESIGN §3)
-    Ok(())
+    let pushed = producer.push_slice(out);
+    Ok(out.len() - pushed)
 }
 
-/// Enqueue one frame of silence (a lost frame, pre-FEC).
-fn push_silence(channels: usize, out: &mut Vec<f32>, producer: &mut HeapProd<f32>) {
+/// Enqueue one frame of silence (a lost frame, pre-FEC). Returns samples dropped on
+/// overrun.
+fn push_silence(channels: usize, out: &mut Vec<f32>, producer: &mut HeapProd<f32>) -> usize {
     out.clear();
     out.resize(FRAME * channels, 0.0);
-    producer.push_slice(out);
+    let pushed = producer.push_slice(out);
+    out.len() - pushed
 }

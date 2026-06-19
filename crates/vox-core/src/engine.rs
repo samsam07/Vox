@@ -81,6 +81,8 @@ pub struct EngineStats {
     pub bytes_received: u64,
     pub gap_frames: u64,
     pub dropped_late: u64,
+    /// Cumulative jitter-buffer overruns (frames dropped because the ring was full).
+    pub overruns: u64,
     /// Current jitter-buffer occupancy and capacity, in samples.
     pub jitter_fill: u64,
     pub jitter_capacity: u64,
@@ -157,6 +159,7 @@ impl Engine {
             stats.bytes_received = receiver.stats.bytes.load(Ordering::Relaxed);
             stats.gap_frames = receiver.stats.gap_frames.load(Ordering::Relaxed);
             stats.dropped_late = receiver.stats.dropped_late.load(Ordering::Relaxed);
+            stats.overruns = receiver.stats.overruns.load(Ordering::Relaxed);
             stats.jitter_fill = receiver.stats.jitter_fill.load(Ordering::Relaxed);
             stats.jitter_capacity = receiver.capacity as u64;
         }
@@ -180,6 +183,7 @@ impl Engine {
             stats.bytes_received = counters.bytes.load(Ordering::Relaxed);
             stats.gap_frames = counters.gap_frames.load(Ordering::Relaxed);
             stats.dropped_late = counters.dropped_late.load(Ordering::Relaxed);
+            stats.overruns = counters.overruns.load(Ordering::Relaxed);
         }
         Ok(stats)
     }

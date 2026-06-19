@@ -171,19 +171,12 @@ fn draw(
     } else {
         Color::Red
     };
+    let overrun_color = (stats.overruns > 0).then_some(Color::Red);
     let quality = Paragraph::new(vec![
-        Line::from(vec![
-            "loss   ".dark_gray(),
-            format!("{loss:.1}%").fg(lcolor).bold(),
-        ]),
-        Line::from(vec![
-            "gaps   ".dark_gray(),
-            stats.gap_frames.to_string().into(),
-        ]),
-        Line::from(vec![
-            "drops  ".dark_gray(),
-            stats.dropped_late.to_string().into(),
-        ]),
+        qline("loss", format!("{loss:.1}%"), Some(lcolor)),
+        qline("gaps", stats.gap_frames.to_string(), None),
+        qline("drops", stats.dropped_late.to_string(), None),
+        qline("overrun", stats.overruns.to_string(), overrun_color),
     ])
     .block(rounded("quality"));
     frame.render_widget(quality, quality_a);
@@ -238,6 +231,14 @@ fn kv(label: &str, value: &str) -> Line<'static> {
         format!("{label:<9}").dark_gray(),
         value.to_string().into(),
     ])
+}
+
+fn qline(label: &str, value: String, color: Option<Color>) -> Line<'static> {
+    let value = match color {
+        Some(c) => value.fg(c).bold(),
+        None => value.into(),
+    };
+    Line::from(vec![format!("{label:<8}").dark_gray(), value])
 }
 
 fn rate_line(label: &str, kbps_val: f64, pps: f64, color: Color) -> Line<'static> {
