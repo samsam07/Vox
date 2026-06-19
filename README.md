@@ -93,4 +93,5 @@ non-48k resampling, Linux client) and packaging for third parties come next; see
 ## Scope
 
 In: two-peer duplex voice over LAN, device selection, adjustable quality, graceful
-loss. Out: encryption, more than two peers, GUI, audio mixing/effects.
+loss. Planned for Phase 3: payload encryption. Out: more than two peers, GUI,
+audio mixing/effects.

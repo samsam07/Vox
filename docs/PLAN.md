@@ -84,8 +84,11 @@ Enable Opus in-band FEC + gap-detection→FEC-decode (deferred from M4/M5). Test
 under simulated loss.
 - Exit: audio degrades gracefully, not glitchy, under induced drop.
 
-### M8 — Reconnection robustness
-One side restarts without killing the other.
+### M8 — Reconnection robustness + jitter recentering
+One side restarts without killing the other. Also add a minimal jitter-buffer
+recentering stopgap for clock drift (drop a frame when the buffer sits high, hold
+one when it sits low) — no resampler, just occasional frame add/drop — to blunt the
+overrun glitching until the proper M10 resampling fix.
 
 ### M9 — `[PHASE-2]` resampling
 Non-48k devices via a resampler (`rubato`). Lifts the 48k-only constraint.
@@ -106,3 +109,8 @@ M1 dual-stream smoke test on ALSA/PipeWire.
 ### M13 — packaging, logging/diagnostics, config validation, external-user docs.
 ### M13b — `[PHASE-3]` evaluate `opus-rs` to drop the libopus C dependency.
 ### M14 — `[PHASE-3]` Android front-end on `vox-core` (Oboe/AAudio + JNI/uniffi, libopus via NDK) — walkie-talkie app.
+### M15 — `[PHASE-3]` Encryption
+Optional authenticated encryption of the UDP payload (e.g. ChaCha20-Poly1305 with a
+pre-shared key) so vox is safe on untrusted networks. Adds a nonce to the packet
+header (§5) and a key/PSK config knob. `[CRYSTALLIZE]` cipher, key handling, and the
+exact header change when the slice begins.

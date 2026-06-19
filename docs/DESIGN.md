@@ -164,8 +164,11 @@ Mirror instance on the peer runs the same two paths.
 
 ## 10. Out of scope (kept here so it is not "rediscovered")
 
-Encryption; >2 peers; GUI; audio mixing/effects; half-duplex-by-default (duplex is
-the definition; one direction is achieved via `--capture none` / `--playback none`).
+\>2 peers; GUI; audio mixing/effects; half-duplex-by-default (duplex is the
+definition; one direction is achieved via `--capture none` / `--playback none`).
+
+Encryption was out of scope for the MVP but is now a planned Phase-3 feature
+(PLAN M15) — optional payload encryption so vox is safe on untrusted networks.
 
 ## 11. Crate structure (locked at M6)
 
