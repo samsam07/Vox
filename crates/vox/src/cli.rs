@@ -88,18 +88,18 @@ pub struct Cli {
     /// Opus target bitrate, bits/s.
     #[arg(long)]
     pub bitrate: Option<i32>,
-    /// In-band FEC (takes effect at M7).
+    /// In-band FEC: redundant copy of each frame recovers a single drop (default on).
     #[arg(long)]
     pub fec: Option<bool>,
-    /// Expected packet loss %, to tune FEC (takes effect at M7).
+    /// Expected packet loss %, to tune FEC (only applied when fec is on).
     #[arg(long = "expected-loss")]
     pub expected_loss: Option<u8>,
-    /// Discontinuous transmission / silence suppression (takes effect at M7).
+    /// Discontinuous transmission / silence suppression.
     #[arg(long)]
     pub dtx: Option<bool>,
 
     // --- Receive-path ---
-    /// Jitter buffer depth, ms (~40-60).
+    /// Jitter buffer depth, ms (default 100; lower on a clean wired LAN, higher on WiFi).
     #[arg(long = "jitter-ms")]
     pub jitter_ms: Option<u32>,
 

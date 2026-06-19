@@ -32,18 +32,46 @@ impl SendThread {
     }
 }
 
+/// Encoder-only / send-path codec settings (DESIGN §4, §6). `expected_loss` tunes
+/// FEC and so only applies when `fec` is on.
+pub(crate) struct EncoderParams {
+    pub(crate) bitrate: i32,
+    pub(crate) fec: bool,
+    pub(crate) expected_loss: u8,
+    pub(crate) dtx: bool,
+}
+
 pub(crate) fn spawn(
     consumer: HeapCons<f32>,
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     channels: usize,
-    bitrate: i32,
+    params: EncoderParams,
 ) -> Result<SendThread> {
     let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
         .context("create opus encoder")?;
     encoder
-        .set_bitrate(opus::Bitrate::Bits(bitrate))
+        .set_bitrate(opus::Bitrate::Bits(params.bitrate))
         .context("set opus bitrate")?;
+    // In-band FEC carries a redundant low-bitrate copy of the previous frame inside
+    // each packet; the receiver reconstructs a single lost frame from it (DESIGN §4).
+    encoder
+        .set_inband_fec(params.fec)
+        .context("set opus inband fec")?;
+    // packet-loss-perc tunes how much FEC redundancy the encoder spends; it only
+    // matters with FEC on, so leave it at 0 otherwise (cli: "to tune FEC").
+    let loss = if params.fec {
+        (params.expected_loss as i32).min(100)
+    } else {
+        0
+    };
+    encoder
+        .set_packet_loss_perc(loss)
+        .context("set opus packet-loss perc")?;
+    // DTX shrinks silence frames to 1-2 byte packets. We still transmit every frame
+    // (seq stays contiguous → a receiver gap always means real loss, not silence),
+    // which also keeps NAT mappings warm on the symmetric UDP peers (DESIGN §1).
+    encoder.set_dtx(params.dtx).context("set opus dtx")?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let packets = Arc::new(AtomicU64::new(0));

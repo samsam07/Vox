@@ -39,7 +39,10 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
 - Capture ring: SPSC lock-free (`ringbuf`/`rtrb`). Writer = capture callback;
   reader = send thread.
 - Jitter buffer (receive side): writer = receive thread; reader = playback
-  callback. Fixed ring, ~40–60 ms, CLI-tunable (`jitter-ms`).
+  callback. Fixed ring, ~100 ms default, CLI-tunable (`jitter-ms`) — a clean wired
+  LAN can go lower; a WiFi leg or Windows scheduling burst needs more. (M8/M10 make
+  this adaptive; until then the default is sized for the common Windows/WiFi case,
+  not the best case.)
   - Overrun → drop. Underrun → insert silence / Opus PLC frame.
   - Handles short-term network jitter. Does NOT handle long-term clock drift
     between the independent capture/playback/peer clocks — over a long session the
@@ -66,12 +69,15 @@ shared mutability.
     require a channel field in the header or a handshake the connectionless model
     lacks. Decision established empirically at M1 (VB-Cable is stereo-only here).
 - FEC enabled (in-band). Encoder: FEC on, expected-packet-loss ~5–10%
-  (justified by WiFi on the client leg), DTX on. This is the end-state; `fec`/`dtx`
-  are parsed from config but default off and are not acted on until M7 wires the
-  FEC encode/decode path (see §7).
+  (justified by WiFi on the client leg), DTX on. This is the recommended end-state
+  config. M7 wired the encode/decode path: `fec`/`expected_loss`/`dtx` drive the
+  encoder, the receiver reconstructs loss (FEC + PLC, below), and `fec`'s default is
+  now on (§7). DTX shrinks silent frames but vox still transmits every frame so the
+  sequence stays contiguous (a receiver gap always means real loss).
 - FEC ↔ jitter buffer are coupled: FEC reconstructs a lost frame N from a
   redundant copy carried in frame N+1, which only works if the jitter buffer held
-  N+1 long enough. The ~40–60 ms buffer provides that look-ahead.
+  N+1 long enough. The buffer (≥ one frame deep, ~100 ms by default) provides that
+  look-ahead.
 - MVP is 48 kHz only. Non-48k capture/playback requires a resampler — `[PHASE-2]`,
   shares its resampler with drift compensation.
 - `[PHASE-2]` evaluate `opus-rs` (pure-Rust Opus) to drop the libopus C build.
@@ -139,9 +145,9 @@ Precedence: flag > TOML > default. See `samples/vox.toml`.
 Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
 `*_sample_rate` 48000 (the only valid value in Phase 1), `*_channels`
 auto-negotiated (mono if the device supports it, else stereo), `bitrate` 24000,
-`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 50. `fec` /
-`expected_loss` / `dtx` are parsed but not yet acted on — they take effect at M7
-(FEC), when `fec`'s default flips to true.
+`fec` true, `expected_loss` 10, `dtx` false, `jitter_ms` 100. `fec` /
+`expected_loss` / `dtx` take effect on the encoder as of M7; `expected_loss` only
+applies when `fec` is on.
 
 ## 8. Build (locked)
 

@@ -23,6 +23,12 @@ pub struct EngineConfig {
     pub playback_channels: Option<u16>,
     pub jitter_ms: u32,
     pub bitrate: i32,
+    /// In-band FEC on the send path (DESIGN §4, §7).
+    pub fec: bool,
+    /// Expected packet-loss %, tuning FEC (only applied when `fec` is on).
+    pub expected_loss: u8,
+    /// Discontinuous transmission / silence suppression on the send path.
+    pub dtx: bool,
 }
 
 /// Non-blocking sink: the platform's record callback pushes device PCM into it.
@@ -109,7 +115,12 @@ impl Engine {
                     Arc::clone(&socket),
                     peer,
                     channels as usize,
-                    config.bitrate,
+                    send::EncoderParams {
+                        bitrate: config.bitrate,
+                        fec: config.fec,
+                        expected_loss: config.expected_loss,
+                        dtx: config.dtx,
+                    },
                 )?;
                 (Some(thread), Some(CaptureSink { producer }))
             }
@@ -123,7 +134,7 @@ impl Engine {
                 let ring = HeapRb::<f32>::new(capacity);
                 let (mut producer, consumer) = ring.split();
                 // Prefill a look-ahead cushion so playback starts smoothly and
-                // short-term jitter is absorbed (the buffer FEC relies on at M7).
+                // short-term jitter is absorbed (and FEC gets its look-ahead — §4).
                 producer.push_slice(&vec![0.0f32; capacity / 2]);
                 let thread =
                     receive::spawn(producer, Arc::clone(&socket), channels as usize, capacity)?;

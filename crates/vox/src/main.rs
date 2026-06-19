@@ -91,6 +91,9 @@ fn main() -> Result<()> {
         playback_channels,
         jitter_ms: config.jitter_ms,
         bitrate: config.bitrate,
+        fec: config.fec,
+        expected_loss: config.expected_loss,
+        dtx: config.dtx,
     })?;
 
     let info = SessionInfo {
@@ -179,9 +182,6 @@ fn log_summary(info: &SessionInfo) {
         "codec {} bps, jitter {} ms, fec={}, dtx={}",
         info.bitrate, info.jitter_ms, info.fec, info.dtx
     );
-    if info.fec || info.dtx {
-        info!("note: fec/dtx are parsed but take effect at M7");
-    }
 }
 
 fn report_final(output: OutputMode, sending: bool, receiving: bool, stats: &EngineStats) {

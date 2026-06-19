@@ -11,8 +11,8 @@ use crate::cli::Cli;
 pub const DEFAULT_PORT: u16 = 9680;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_BITRATE: i32 = 24_000;
-const DEFAULT_JITTER_MS: u32 = 50;
-const DEFAULT_FEC: bool = false;
+const DEFAULT_JITTER_MS: u32 = 100;
+const DEFAULT_FEC: bool = true;
 const DEFAULT_EXPECTED_LOSS: u8 = 10;
 const DEFAULT_DTX: bool = false;
 

@@ -22,9 +22,9 @@ playback_sample_rate = 48000
 
 # --- Codec / send-path (encoder only) ---
 bitrate       = 24000   # Opus target bits/s (voice-grade).
-fec           = false   # in-band FEC. Parsed now; takes effect at M7.
-expected_loss = 10      # % loss to tune FEC for (~5-10%, WiFi leg). M7.
-dtx           = false   # discontinuous transmission. Parsed now; takes effect at M7.
+fec           = true    # in-band FEC: recover a single dropped frame (default on).
+expected_loss = 10      # % loss to tune FEC for (~5-10%, WiFi leg). Only used with fec.
+dtx           = false   # discontinuous transmission (silence suppression).
 
 # --- Receive-path ---
-jitter_ms = 50          # jitter buffer depth (~40-60 ms).
+jitter_ms = 100         # jitter buffer depth (default; lower on wired LAN, higher on WiFi).
