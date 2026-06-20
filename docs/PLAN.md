@@ -101,9 +101,21 @@ Non-48k devices via a resampler (`rubato`). Lifts the 48k-only constraint.
 - Done: edge resampling (capture→48k, 48k→playback), passthrough at 48 kHz; rate
   auto-selection (prefer 48 kHz, else native). Verified on a non-48 kHz device.
 
-### M10 — `[PHASE-2]` drift compensation + adaptive jitter — next up
-Resampling-based clock-drift correction (shares M9 resampler) + adaptive buffer
-sizing. Kills the long-session blip and retires M8's coarse frame drop/hold.
+### M10 — `[PHASE-2]` adaptive jitter (was: drift compensation + adaptive jitter)
+Originally drift compensation (resampling) + adaptive buffer sizing. The
+resampling-drift half was built (M10p1) and **shelved** after machine-to-machine
+testing: it taxed the common 48 kHz path (always-on resampler) without reducing the
+real-world recenter, because **jitter, not drift, dominates** on actual links. So
+M10 is reframed as **adaptive jitter sizing** — measure arrival jitter and size the
+buffer/target to it (lower latency on clean links, more slack on bursty ones). M10p1
+is stashed; we may gate it behind an opt-in `--drift-correct` flag (default off) for
+drift-heavy long sessions, decided per need.
+
+Phase-2 tuning that came out of M10 testing (smaller fixes, done ahead of M10
+proper): `fec` default reverted to **off** (it costs primary-signal quality + adds
+jitter; only helps on lossy links — see DESIGN §4); recenter watermarks widened from
+¾/¼ to ⅞/⅛ (near-rail backstop, not a centering force, so it stops cutting off on
+normal jitter); a codec/config line added to the TUI Status panel.
 
 ### M11 — Fedora native build + Linux client
 Bring up native Linux build (`alsa-lib-devel`); validate Windows↔Linux. Re-run the
@@ -116,6 +128,7 @@ M1 dual-stream smoke test on ALSA/PipeWire.
 ### M12 — `cargo-zigbuild` cross-compile from Fedora (Linux→Windows).
 ### M13 — packaging, logging/diagnostics, config validation, external-user docs.
 ### M13b — `[PHASE-3]` evaluate `opus-rs` to drop the libopus C dependency.
+### M13c — `[PHASE-3]` adaptive FEC — auto-enable in-band FEC when the receiver reports real packet loss, so lossy links self-heal without the clean-link quality tax (FEC is opt-in/off by default as of Phase 2).
 ### M14 — `[PHASE-3]` Android front-end on `vox-core` (Oboe/AAudio + JNI/uniffi, libopus via NDK) — walkie-talkie app.
 ### M15 — `[PHASE-3]` Encryption
 Optional authenticated encryption of the UDP payload (e.g. ChaCha20-Poly1305 with a

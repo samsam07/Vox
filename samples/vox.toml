@@ -24,8 +24,9 @@ playback = "default"    # local play device.   "none" = send-only.
 
 # --- Codec / send-path (encoder only) ---
 bitrate       = 24000   # Opus target bits/s (voice-grade).
-fec           = true    # in-band FEC: recover a single dropped frame (default on).
-expected_loss = 10      # % loss to tune FEC for (~5-10%, WiFi leg). Only used with fec.
+fec           = false   # in-band FEC (default off): costs quality + jitter; enable
+                        # only on genuinely lossy links.
+expected_loss = 10      # % loss to tune FEC for (~5-10%). Only used when fec = true.
 dtx           = false   # discontinuous transmission (silence suppression).
 
 # --- Receive-path ---

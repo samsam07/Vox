@@ -168,11 +168,12 @@ struct Receiver {
 }
 
 impl Receiver {
-    /// `capacity` is the jitter ring's sample capacity (at the playback rate);
-    /// recentering acts at the outer quarters (≥¾ full → drop, ≤¼ full → hold) so it
-    /// leaves the middle half — where the buffer normally sits and short-term jitter
-    /// lives — alone. Decoded audio is resampled 48 kHz → `playback_rate` before it
-    /// is enqueued (a passthrough at 48 kHz).
+    /// `capacity` is the jitter ring's sample capacity (at the playback rate).
+    /// Recentering acts only at the outer eighths (≥⅞ full → drop, ≤⅛ full → hold),
+    /// so it is a near-rail backstop against drift/overrun, not a centering force —
+    /// the wide middle band absorbs normal jitter without a (cutoff-causing) frame
+    /// drop/hold. Decoded audio is resampled 48 kHz → `playback_rate` before it is
+    /// enqueued (a passthrough at 48 kHz).
     fn new(
         decoder: opus::Decoder,
         channels: usize,
@@ -187,8 +188,8 @@ impl Receiver {
             resampler: Resampler::new(crate::audio::RATE, playback_rate)?,
             play: Vec::with_capacity(FRAME * 2),
             out: Vec::with_capacity(FRAME * channels),
-            high_watermark: capacity * 3 / 4,
-            low_watermark: capacity / 4,
+            high_watermark: capacity * 7 / 8,
+            low_watermark: capacity / 8,
         })
     }
 

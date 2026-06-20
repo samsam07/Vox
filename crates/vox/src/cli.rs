@@ -88,7 +88,8 @@ pub struct Cli {
     /// Opus target bitrate, bits/s.
     #[arg(long)]
     pub bitrate: Option<i32>,
-    /// In-band FEC: redundant copy of each frame recovers a single drop (default on).
+    /// In-band FEC (default off): recovers a dropped frame, but costs quality +
+    /// jitter — enable only on genuinely lossy links.
     #[arg(long)]
     pub fec: Option<bool>,
     /// Expected packet loss %, to tune FEC (only applied when fec is on).

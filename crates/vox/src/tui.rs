@@ -107,7 +107,7 @@ fn draw(
 ) {
     let [header_a, mid_a, chart_a, footer_a] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(11),
+        Constraint::Length(12),
         Constraint::Min(6),
         Constraint::Length(1),
     ])
@@ -135,6 +135,16 @@ fn draw(
         kv("peer", &peer),
         kv("bind", &info.bind.to_string()),
         kv("uptime", &format_duration(uptime)),
+        kv(
+            "codec",
+            &format!(
+                "{} bps   fec {}   dtx {}   jitter {} ms",
+                info.bitrate,
+                on_off(info.fec),
+                on_off(info.dtx),
+                info.jitter_ms
+            ),
+        ),
         Line::from(""),
         throughput_line("tx", rate.tx_kbps, rate.tx_pps, stats.bytes_sent, TX_COLOR),
         throughput_line(
@@ -266,6 +276,14 @@ fn kv(label: &str, value: &str) -> Line<'static> {
         format!("{label:<9}").dark_gray(),
         value.to_string().into(),
     ])
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn qline(label: &str, value: String, color: Option<Color>) -> Line<'static> {

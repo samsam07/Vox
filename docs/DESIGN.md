@@ -72,11 +72,16 @@ shared mutability.
   - Revisit (post-MVP): native stereo end-to-end (no mix) is deferred — it would
     require a channel field in the header or a handshake the connectionless model
     lacks. Decision established empirically at M1 (VB-Cable is stereo-only here).
-- FEC enabled (in-band). Encoder: FEC on, expected-packet-loss ~5–10%
-  (justified by WiFi on the client leg), DTX on. This is the recommended end-state
-  config. M7 wired the encode/decode path: `fec`/`expected_loss`/`dtx` drive the
-  encoder, the receiver reconstructs loss (FEC + PLC, below), and `fec`'s default is
-  now on (§7). DTX shrinks silent frames but vox still transmits every frame so the
+- FEC is in-band, available, but **off by default** (opt-in via `--fec`). M7 wired
+  the encode/decode path: when on, `fec`/`expected_loss`/`dtx` drive the encoder and
+  the receiver reconstructs loss (FEC + PLC, below). The earlier default-on was
+  reverted after machine-to-machine testing: in-band FEC carries a redundant copy of
+  the previous frame, which both **steals bitrate from the primary signal** (an
+  audible quality/wobble cost at 24 kbps) and **enlarges packets** (more arrival
+  jitter → more recentering). That only pays off when real loss is high; on a clean
+  LAN or 5 GHz WiFi it is a net loss, so the default is off and you enable it for
+  genuinely lossy links. `[PHASE-3]` make FEC adaptive (auto-enable on measured
+  loss). DTX shrinks silent frames but vox still transmits every frame so the
   sequence stays contiguous (a receiver gap always means real loss).
 - FEC ↔ jitter buffer are coupled: FEC reconstructs a lost frame N from a
   redundant copy carried in frame N+1, which only works if the jitter buffer held
@@ -157,7 +162,7 @@ Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
 `*_sample_rate` auto (prefer 48 kHz when the device supports it, else its native
 rate + resample — M9), `*_channels` auto-negotiated (mono if the device supports it,
 else stereo), `bitrate` 24000,
-`fec` true, `expected_loss` 10, `dtx` false, `jitter_ms` 100. `fec` /
+`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 100. `fec` /
 `expected_loss` / `dtx` take effect on the encoder as of M7; `expected_loss` only
 applies when `fec` is on.
 
