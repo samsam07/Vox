@@ -121,13 +121,21 @@ jitter; only helps on lossy links — see DESIGN §4); recenter watermarks widen
 near-rail/adaptive backstop so they stop cutting off on normal jitter; Windows timer
 resolution raised to 1 ms; TUI codec/config line.
 
-### M10b — smooth clock-drift compensation (promoted from Phase 3)
+### M10b — smooth clock-drift compensation — ✅ COMPLETE (opt-in)
 The adaptive jitter buffer (M10) holds the band against jitter, but slow clock drift
 (peer capture clock vs local playback clock) still creeps the buffer toward a rail
 over a session, corrected only coarsely by the recenter drop/hold (the residual seen
 in M10 testing). The smooth fix: resample the receive stream at a ratio nudged by a
 control loop so the buffer holds its target with no discrete cutoffs — which also
 drops latency from ~ceiling back toward the target.
+
+Implemented behind `--drift-correct` (default off, per the revival plan — not
+always-on): a `DriftResampler` (rubato `SincFixedIn`) + a proportional `DriftController`
+on EMA-smoothed occupancy, holding the buffer at the M10 band centre. Default path is
+unchanged (static resampler, no controller).
+- Done: verified machine-to-machine — with it on, the buffer holds near target, drift
+  reads ~0 ms/min, recenter ~0, audio clean, no measurable performance hit. Stays
+  opt-in: it only helps where drift exists, so a clean LAN shouldn't pay the resampler.
 
 Built once as M10p1 and shelved (it taxed the common 48 kHz path and didn't help
 jitter, which dominates). Revival plan: do **not** make it always-on — gate it

@@ -45,6 +45,7 @@ pub(crate) struct SessionInfo {
     pub jitter_ms: u32,
     pub fec: bool,
     pub dtx: bool,
+    pub drift_correct: bool,
 }
 
 fn main() -> Result<()> {
@@ -124,6 +125,7 @@ fn main() -> Result<()> {
         fec: config.fec,
         expected_loss: config.expected_loss,
         dtx: config.dtx,
+        drift_correct: config.drift_correct,
     })?;
 
     let info = SessionInfo {
@@ -144,6 +146,7 @@ fn main() -> Result<()> {
         jitter_ms: config.jitter_ms,
         fec: config.fec,
         dtx: config.dtx,
+        drift_correct: config.drift_correct,
     };
 
     // Wire the cpal stream callbacks to the engine's ring ports. Keep the streams
@@ -223,8 +226,8 @@ fn log_summary(info: &SessionInfo) {
     }
     info!("listening {}", info.bind);
     info!(
-        "codec {} bps, jitter {} ms, fec={}, dtx={}",
-        info.bitrate, info.jitter_ms, info.fec, info.dtx
+        "codec {} bps, jitter {} ms, fec={}, dtx={}, drift-correct={}",
+        info.bitrate, info.jitter_ms, info.fec, info.dtx, info.drift_correct
     );
 }
 

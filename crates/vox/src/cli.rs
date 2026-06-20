@@ -104,6 +104,10 @@ pub struct Cli {
     /// measured jitter — default 150).
     #[arg(long = "jitter-ms")]
     pub jitter_ms: Option<u32>,
+    /// Smooth clock-drift compensation (default off): resample to hold the buffer at
+    /// its target instead of the coarse recenter. Enable if the TUI shows drift.
+    #[arg(long = "drift-correct")]
+    pub drift_correct: Option<bool>,
 
     /// Run for N seconds then exit (default: until Ctrl+C). For tests/ops.
     #[arg(long)]

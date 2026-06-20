@@ -33,6 +33,10 @@ Nothing released yet — everything below is the content of the upcoming **0.1.0
   (RFC3550, from the packet timestamp) — shallow / low-latency on clean links, deeper
   on bursty ones — with a recenter drop/hold backstop for slow clock drift.
   `--jitter-ms` is the depth ceiling (default 150).
+- **Smooth clock-drift compensation** (opt-in via `--drift-correct`, off by default):
+  a dynamic-ratio resampler trimmed by a controller holds the buffer at its target,
+  removing drift cutoffs and keeping latency near the target. A TUI **drift** readout
+  (buffer-latency trend, ms/min) flags when to enable it.
 - **Non-48 kHz device resampling** (`rubato`): a device that doesn't run at 48 kHz is
   opened at its native rate and resampled at the edge; the wire stays 48 kHz mono.
 - **Apollo / Sunshine integration**: runs until a stop signal so connect/disconnect

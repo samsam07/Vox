@@ -68,9 +68,16 @@ Example — client (real mic and headphones):
 vox --peer 192.168.1.10
 ```
 
-Audio tuning (`--bitrate`, `--fec`, `--jitter-ms`, per-device sample rate, etc.)
-lives in the TOML config and can be overridden by flags. See
+Audio tuning (`--bitrate`, `--fec`, `--jitter-ms`, `--drift-correct`, per-device
+sample rate, etc.) lives in the TOML config and can be overridden by flags. See
 [`docs/DESIGN.md`](docs/DESIGN.md) §6–§7.
+
+**Drift correction.** If the TUI's `drift` readout sits at a steady nonzero value
+(the jitter buffer slowly filling or draining over minutes — independent clocks on
+the two machines), enable `--drift-correct`: it smoothly holds the buffer at its
+target, removing the occasional clock-drift cutoff and keeping latency low. It's off
+by default because it only helps where drift exists — on a clean link it just adds a
+resampler for no gain.
 
 ## Building
 

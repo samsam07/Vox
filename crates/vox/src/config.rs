@@ -14,6 +14,7 @@ const DEFAULT_JITTER_MS: u32 = 150;
 const DEFAULT_FEC: bool = false;
 const DEFAULT_EXPECTED_LOSS: u8 = 10;
 const DEFAULT_DTX: bool = false;
+const DEFAULT_DRIFT_CORRECT: bool = false;
 
 /// The TOML file shape (every key optional; `deny_unknown_fields` catches typos).
 #[derive(Deserialize, Default)]
@@ -32,6 +33,7 @@ struct FileConfig {
     expected_loss: Option<u8>,
     dtx: Option<bool>,
     jitter_ms: Option<u32>,
+    drift_correct: Option<bool>,
 }
 
 /// Fully resolved configuration the binary acts on.
@@ -50,6 +52,7 @@ pub struct Config {
     pub expected_loss: u8,
     pub dtx: bool,
     pub jitter_ms: u32,
+    pub drift_correct: bool,
     pub duration: Option<u64>,
 }
 
@@ -92,6 +95,10 @@ impl Config {
                 .jitter_ms
                 .or(file.jitter_ms)
                 .unwrap_or(DEFAULT_JITTER_MS),
+            drift_correct: cli
+                .drift_correct
+                .or(file.drift_correct)
+                .unwrap_or(DEFAULT_DRIFT_CORRECT),
             duration: cli.duration,
         })
     }
@@ -120,6 +127,7 @@ impl Config {
             line("expected_loss", self.expected_loss.to_string()),
             line("dtx", self.dtx.to_string()),
             line("jitter_ms", self.jitter_ms.to_string()),
+            line("drift_correct", self.drift_correct.to_string()),
         ];
         let mut out = std::io::stdout();
         for l in lines {

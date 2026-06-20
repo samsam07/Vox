@@ -35,6 +35,9 @@ pub struct EngineConfig {
     pub expected_loss: u8,
     /// Discontinuous transmission / silence suppression on the send path.
     pub dtx: bool,
+    /// Smooth clock-drift compensation on the receive path (M10b). Off by default;
+    /// engages a dynamic resampler that holds the buffer at its target.
+    pub drift_correct: bool,
 }
 
 /// Non-blocking sink: the platform's record callback pushes device PCM into it.
@@ -168,6 +171,7 @@ impl Engine {
                     channels as usize,
                     capacity,
                     config.playback_sample_rate,
+                    config.drift_correct,
                 )?;
                 (Some(thread), Some(PlaybackSource { consumer }))
             }

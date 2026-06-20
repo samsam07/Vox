@@ -22,11 +22,47 @@ use ringbuf::HeapProd;
 use crate::audio::{FRAME, MAX_PACKET};
 use crate::jitter::{adaptive_watermarks, ease, JitterEstimator};
 use crate::packet;
-use crate::resample::Resampler;
+use crate::resample::ReceiveResampler;
 
 /// Frames of gap beyond which we assume a discontinuity (peer restart) and resync
 /// instead of filling silence — ~1 s at 20 ms/frame.
 const MAX_GAP_FRAMES: u32 = 50;
+
+/// Drift controller (M10b) gains. EMA weight on occupancy (so it tracks slow drift,
+/// not jitter) and proportional gain mapping the normalized occupancy error → trim.
+const DRIFT_EMA_ALPHA: f64 = 0.05;
+const DRIFT_GAIN: f64 = 0.02;
+
+/// Proportional controller for smooth clock-drift correction (M10b, `--drift-correct`):
+/// trims the resampler's output rate to hold occupancy at the adaptive setpoint, on an
+/// EMA-smoothed occupancy so it follows the drift trend, not per-packet jitter.
+struct DriftController {
+    smoothed: f64,
+    primed: bool,
+}
+
+impl DriftController {
+    fn new() -> Self {
+        DriftController {
+            smoothed: 0.0,
+            primed: false,
+        }
+    }
+
+    /// Fold in the current occupancy and return the trim toward `setpoint`: negative
+    /// when the buffer sits above setpoint (slow the producer), positive below.
+    fn update(&mut self, occupancy: usize, setpoint: usize) -> f64 {
+        let occ = occupancy as f64;
+        if self.primed {
+            self.smoothed += DRIFT_EMA_ALPHA * (occ - self.smoothed);
+        } else {
+            self.smoothed = occ;
+            self.primed = true;
+        }
+        let setpoint = (setpoint as f64).max(1.0);
+        -DRIFT_GAIN * (self.smoothed - setpoint) / setpoint
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Stats {
@@ -74,6 +110,7 @@ pub(crate) fn spawn(
     channels: usize,
     capacity: usize,
     playback_rate: u32,
+    drift_correct: bool,
 ) -> Result<ReceiveThread> {
     let decoder = opus::Decoder::new(crate::audio::RATE, opus::Channels::Mono)
         .context("create opus decoder")?;
@@ -90,6 +127,7 @@ pub(crate) fn spawn(
                 channels,
                 capacity,
                 playback_rate,
+                drift_correct,
                 stop,
                 stats,
             )
@@ -111,11 +149,12 @@ fn recv_loop(
     channels: usize,
     capacity: usize,
     playback_rate: u32,
+    drift_correct: bool,
     stop: Arc<AtomicBool>,
     stats: Arc<Stats>,
 ) -> Result<()> {
     let mut buf = vec![0u8; packet::HEADER_LEN + MAX_PACKET];
-    let mut receiver = Receiver::new(decoder, channels, capacity, playback_rate)?;
+    let mut receiver = Receiver::new(decoder, channels, capacity, playback_rate, drift_correct)?;
 
     while !stop.load(Ordering::Acquire) {
         let n = match socket.recv_from(&mut buf) {
@@ -141,7 +180,12 @@ fn recv_loop(
         stats.received.fetch_add(1, Ordering::Relaxed);
         stats.bytes.fetch_add(n as u64, Ordering::Relaxed);
 
-        receiver.observe_arrival(Instant::now(), pkt.timestamp, &stats);
+        receiver.observe_arrival(
+            Instant::now(),
+            pkt.timestamp,
+            producer.occupied_len(),
+            &stats,
+        )?;
         receiver.accept(pkt.seq, pkt.payload, &mut producer, &stats)?;
 
         let occupied = producer.occupied_len() as u64;
@@ -165,8 +209,11 @@ struct Receiver {
     expected: Option<u32>,
     /// 48 kHz mono decode scratch (one 20 ms frame).
     decoded: Vec<f32>,
-    /// Resamples decoded 48 kHz mono → the playback device rate (passthrough at 48k).
-    resampler: Resampler,
+    /// Resamples decoded 48 kHz mono → the playback device rate (passthrough at 48k,
+    /// or the dynamic drift resampler when `--drift-correct` is on — M10b).
+    resampler: ReceiveResampler,
+    /// Smooth clock-drift controller; `Some` only when `--drift-correct` is on (M10b).
+    drift: Option<DriftController>,
     /// Playback-rate mono scratch (the resampler's output).
     play: Vec<f32>,
     /// Interleaved upmix scratch (playback-rate frame × `channels`).
@@ -196,6 +243,7 @@ impl Receiver {
         channels: usize,
         capacity: usize,
         playback_rate: u32,
+        drift_correct: bool,
     ) -> Result<Self> {
         let (low_watermark, high_watermark) =
             adaptive_watermarks(0.0, playback_rate, channels, capacity);
@@ -204,7 +252,8 @@ impl Receiver {
             channels,
             expected: None,
             decoded: vec![0.0f32; FRAME],
-            resampler: Resampler::new(crate::audio::RATE, playback_rate)?,
+            resampler: ReceiveResampler::new(crate::audio::RATE, playback_rate, drift_correct)?,
+            drift: drift_correct.then(DriftController::new),
             play: Vec::with_capacity(FRAME * 2),
             out: Vec::with_capacity(FRAME * channels),
             high_watermark,
@@ -215,10 +264,18 @@ impl Receiver {
         })
     }
 
-    /// Fold a packet arrival into the jitter estimate and resize the recenter band to
-    /// it (M10). Called from the recv loop per datagram (before `accept`), so unit
-    /// tests that drive `accept` directly keep their explicit, fixed watermarks.
-    fn observe_arrival(&mut self, now: Instant, timestamp: u32, stats: &Stats) {
+    /// Fold a packet arrival into the jitter estimate, resize the recenter band to it
+    /// (M10), and — when drift correction is on (M10b) — nudge the resampler to hold
+    /// `occupancy` at the band centre. Called from the recv loop per datagram (before
+    /// `accept`), so unit tests that drive `accept` directly keep their explicit,
+    /// fixed watermarks and never touch the resampler trim.
+    fn observe_arrival(
+        &mut self,
+        now: Instant,
+        timestamp: u32,
+        occupancy: usize,
+        stats: &Stats,
+    ) -> Result<()> {
         let jitter = self.jitter.update(now, timestamp);
         let (target_low, target_high) =
             adaptive_watermarks(jitter, self.playback_rate, self.channels, self.capacity);
@@ -226,10 +283,17 @@ impl Receiver {
         // deepen, slow to shrink).
         self.low_watermark = ease(self.low_watermark, target_low);
         self.high_watermark = ease(self.high_watermark, target_high);
-        // Report the band centre as a depth in ms (per-channel samples / rate).
         let centre = (self.low_watermark + self.high_watermark) / 2;
+        // Smooth drift correction (M10b): trim the resampler toward the band centre so
+        // the buffer holds there instead of drifting to a rail (which would cut off).
+        if let Some(drift) = &mut self.drift {
+            let trim = drift.update(occupancy, centre);
+            self.resampler.set_trim(trim)?;
+        }
+        // Report the band centre as a depth in ms (per-channel samples / rate).
         let ms = centre as u64 * 1000 / (self.playback_rate as u64 * self.channels as u64).max(1);
         stats.target_depth_ms.store(ms, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Handle one parsed packet, using wrap-aware sequence comparison (DESIGN §5) to
@@ -352,9 +416,9 @@ impl Receiver {
 
 #[cfg(test)]
 mod tests {
-    use super::{JitterEstimator, Receiver, Stats, MAX_GAP_FRAMES};
+    use super::{DriftController, JitterEstimator, Receiver, Stats, MAX_GAP_FRAMES};
     use crate::audio::{FRAME, MAX_PACKET, RATE};
-    use crate::resample::Resampler;
+    use crate::resample::{ReceiveResampler, Resampler};
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
 
@@ -363,14 +427,16 @@ mod tests {
 
     /// Build a `Receiver` with explicit watermarks so tests target the recentering
     /// thresholds directly — or disable recentering with `high = usize::MAX, low = 0`.
-    /// Playback stays at 48 kHz, so the resampler is a passthrough.
+    /// Playback stays at 48 kHz with drift correction off, so the resampler is a
+    /// passthrough and `observe_arrival` (which tests don't call) never trims it.
     fn make_receiver(channels: usize, high_watermark: usize, low_watermark: usize) -> Receiver {
         Receiver {
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
             channels,
             expected: None,
             decoded: vec![0.0f32; FRAME],
-            resampler: Resampler::Passthrough,
+            resampler: ReceiveResampler::Static(Resampler::Passthrough),
+            drift: None,
             play: Vec::with_capacity(FRAME),
             out: Vec::with_capacity(FRAME * channels),
             high_watermark,
@@ -601,5 +667,30 @@ mod tests {
         assert_eq!(stats.recenter_drops.load(Ordering::Relaxed), 0);
         assert_eq!(stats.recenter_inserts.load(Ordering::Relaxed), 0);
         assert_eq!(producer.occupied_len(), 6 * FRAME); // exactly one frame enqueued
+    }
+
+    /// The drift controller (M10b) trims negative when the buffer sits above the
+    /// setpoint (slow the producer to drain it), positive when below, ~zero at it.
+    #[test]
+    fn drift_controller_trims_toward_setpoint() {
+        let mut high = DriftController::new();
+        let mut last = 0.0;
+        for _ in 0..50 {
+            last = high.update(4800, 2400);
+        }
+        assert!(last < 0.0, "high buffer → negative trim, got {last}");
+
+        let mut low = DriftController::new();
+        let mut last = 0.0;
+        for _ in 0..50 {
+            last = low.update(0, 2400);
+        }
+        assert!(last > 0.0, "low buffer → positive trim, got {last}");
+
+        let mut at = DriftController::new();
+        assert!(
+            at.update(2400, 2400).abs() < 1e-9,
+            "at setpoint → ~zero trim"
+        );
     }
 }

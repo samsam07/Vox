@@ -49,9 +49,14 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
     frame above the adaptive high watermark, repeat one below the low (loss
     concealment is never dropped). With the band sized to the jitter, normal swings
     free-run inside it without a (cutoff-causing) correction; only slow clock drift
-    occasionally reaches an edge. Long-term drift is otherwise **not** smoothly
-    corrected — M10b (shelved resampling) is the seamless fix; the coarse 20 ms
-    drop/hold is the accepted stopgap for the rare drift event.
+    occasionally reaches an edge.
+  - Long-term drift: by default the coarse recenter drop/hold is the (rare) stopgap.
+    Opt into `--drift-correct` (M10b) for the smooth fix: the receive path runs a
+    dynamic-ratio resampler trimmed by a proportional controller to hold occupancy at
+    the band centre — no 20 ms cutoffs, and the buffer sits at the target instead of
+    drifting to a rail (so latency stays near the target). It's off by default because
+    it puts a resampler on the common path even at 48 kHz; enable it if the TUI shows
+    sustained drift.
 
 Single-owner discipline is enforced by the borrow checker. Do not defeat it with
 shared mutability.

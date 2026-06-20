@@ -34,3 +34,6 @@ dtx           = false   # discontinuous transmission (silence suppression).
 
 # --- Receive-path ---
 jitter_ms = 150         # MAX jitter-buffer depth; vox adapts below it to measured jitter.
+# drift_correct = false # smooth clock-drift compensation (off by default). Enable if
+                        # the TUI's "drift" reads persistently nonzero; costs a little
+                        # latency/CPU (puts a resampler on the receive path).
