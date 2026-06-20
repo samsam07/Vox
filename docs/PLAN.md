@@ -77,25 +77,33 @@ status and the TUI.
 
 ---
 
-## Phase 2 — daily-driver polish — next up
+## Phase 2 — daily-driver polish — in progress (M7–M9 ✅, M10 next)
 
-### M7 — FEC + graceful loss
+### M7 — FEC + graceful loss — ✅ COMPLETE
 Enable Opus in-band FEC + gap-detection→FEC-decode (deferred from M4/M5). Test
 under simulated loss.
 - Exit: audio degrades gracefully, not glitchy, under induced drop.
+- Done: encoder wires `fec`/`expected_loss`/`dtx`; receiver reconstructs loss (FEC
+  for the last lost frame, PLC for earlier); `fec` default flipped on. Verified
+  machine-to-machine under induced loss.
 
-### M8 — Reconnection robustness + jitter recentering
+### M8 — Reconnection robustness + jitter recentering — ✅ COMPLETE
 One side restarts without killing the other. Also add a minimal jitter-buffer
 recentering stopgap for clock drift (drop a frame when the buffer sits high, hold
 one when it sits low) — no resampler, just occasional frame add/drop — to blunt the
 overrun glitching until the proper M10 resampling fix.
+- Done: recentering drop/hold at ¾/¼ watermarks; peer-restart resync (large
+  backward seq jump + decoder reset); send/recv survive transient peer-down socket
+  errors. Verified machine-to-machine (restart one side, the other recovers).
 
-### M9 — `[PHASE-2]` resampling
+### M9 — `[PHASE-2]` resampling — ✅ COMPLETE
 Non-48k devices via a resampler (`rubato`). Lifts the 48k-only constraint.
+- Done: edge resampling (capture→48k, 48k→playback), passthrough at 48 kHz; rate
+  auto-selection (prefer 48 kHz, else native). Verified on a non-48 kHz device.
 
-### M10 — `[PHASE-2]` drift compensation + adaptive jitter
+### M10 — `[PHASE-2]` drift compensation + adaptive jitter — next up
 Resampling-based clock-drift correction (shares M9 resampler) + adaptive buffer
-sizing. Kills the long-session blip.
+sizing. Kills the long-session blip and retires M8's coarse frame drop/hold.
 
 ### M11 — Fedora native build + Linux client
 Bring up native Linux build (`alsa-lib-devel`); validate Windows↔Linux. Re-run the
