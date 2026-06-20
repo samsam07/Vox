@@ -173,7 +173,7 @@ fn draw(
         kv(
             "codec",
             &format!(
-                "{} bps   fec {}   dtx {}   jitter {} ms   drift {}",
+                "{} bps   fec {}   dtx {}   jitter {} ms   drift-correct {}",
                 info.bitrate,
                 on_off(info.fec),
                 on_off(info.dtx),
