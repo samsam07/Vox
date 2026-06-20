@@ -68,9 +68,32 @@ fn main() -> Result<()> {
         bail!("both capture and playback are 'none'; nothing to do");
     }
 
-    let capture_channels = channels_for(capture.as_ref(), config.capture_channels, Role::Capture)?;
-    let playback_channels =
-        channels_for(playback.as_ref(), config.playback_channels, Role::Playback)?;
+    // Choose each device's operating rate (prefer 48 kHz, else native + resample),
+    // then negotiate channels at that rate. Disabled roles get a harmless default.
+    let capture_rate = match capture.as_ref() {
+        Some(device) => {
+            device::pick_sample_rate(device, Role::Capture, config.capture_sample_rate)?
+        }
+        None => device::RATE,
+    };
+    let playback_rate = match playback.as_ref() {
+        Some(device) => {
+            device::pick_sample_rate(device, Role::Playback, config.playback_sample_rate)?
+        }
+        None => device::RATE,
+    };
+    let capture_channels = channels_for(
+        capture.as_ref(),
+        config.capture_channels,
+        Role::Capture,
+        capture_rate,
+    )?;
+    let playback_channels = channels_for(
+        playback.as_ref(),
+        config.playback_channels,
+        Role::Playback,
+        playback_rate,
+    )?;
 
     let peer = match (&capture, &config.peer) {
         (Some(_), Some(spec)) => Some(vox_core::parse_peer(&with_default_port(spec))?),
@@ -89,6 +112,8 @@ fn main() -> Result<()> {
         bind,
         capture_channels,
         playback_channels,
+        capture_sample_rate: capture_rate,
+        playback_sample_rate: playback_rate,
         jitter_ms: config.jitter_ms,
         bitrate: config.bitrate,
         fec: config.fec,
@@ -101,12 +126,12 @@ fn main() -> Result<()> {
         capture: format!(
             "{}{}",
             describe_device(&capture),
-            channels_label(capture_channels)
+            stream_label(capture_channels, capture_rate)
         ),
         playback: format!(
             "{}{}",
             describe_device(&playback),
-            channels_label(playback_channels)
+            stream_label(playback_channels, playback_rate)
         ),
         peer,
         bind: engine.local_addr()?,
@@ -119,13 +144,21 @@ fn main() -> Result<()> {
     // Wire the cpal stream callbacks to the engine's ring ports. Keep the streams
     // in scope for the session; dropping them stops the audio.
     let cap_stream = match (capture.as_ref(), ports.capture) {
-        (Some(device), Some(sink)) => Some(build_capture(device, capture_channels.unwrap(), sink)?),
+        (Some(device), Some(sink)) => Some(build_capture(
+            device,
+            capture_channels.unwrap(),
+            capture_rate,
+            sink,
+        )?),
         _ => None,
     };
     let play_stream = match (playback.as_ref(), ports.playback) {
-        (Some(device), Some(source)) => {
-            Some(build_playback(device, playback_channels.unwrap(), source)?)
-        }
+        (Some(device), Some(source)) => Some(build_playback(
+            device,
+            playback_channels.unwrap(),
+            playback_rate,
+            source,
+        )?),
         _ => None,
     };
 
@@ -144,11 +177,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Forced channel count if given, else auto-negotiate, else `None` (role disabled).
-fn channels_for(device: Option<&Device>, forced: Option<u16>, role: Role) -> Result<Option<u16>> {
+/// Forced channel count if given, else auto-negotiate at `rate`, else `None` (role
+/// disabled).
+fn channels_for(
+    device: Option<&Device>,
+    forced: Option<u16>,
+    role: Role,
+    rate: u32,
+) -> Result<Option<u16>> {
     match (device, forced) {
         (Some(_), Some(channels)) => Ok(Some(channels)),
-        (Some(device), None) => Ok(Some(device::pick_channels(device, role)?)),
+        (Some(device), None) => Ok(Some(device::pick_channels(device, role, rate)?)),
         (None, _) => Ok(None),
     }
 }
@@ -301,10 +340,15 @@ pub(crate) fn kbps(bytes: u64, secs: f64) -> f64 {
     }
 }
 
-fn build_capture(device: &Device, channels: u16, mut sink: CaptureSink) -> Result<Stream> {
+fn build_capture(
+    device: &Device,
+    channels: u16,
+    rate: u32,
+    mut sink: CaptureSink,
+) -> Result<Stream> {
     let stream = device
         .build_input_stream::<f32, _, _>(
-            &device::stream_config(channels),
+            &device::stream_config(channels, rate),
             // SACRED: non-blocking ring push only.
             move |data: &[f32], _| sink.push(data),
             move |err| error!("capture stream: {err}"),
@@ -315,10 +359,15 @@ fn build_capture(device: &Device, channels: u16, mut sink: CaptureSink) -> Resul
     Ok(stream)
 }
 
-fn build_playback(device: &Device, channels: u16, mut source: PlaybackSource) -> Result<Stream> {
+fn build_playback(
+    device: &Device,
+    channels: u16,
+    rate: u32,
+    mut source: PlaybackSource,
+) -> Result<Stream> {
     let stream = device
         .build_output_stream::<f32, _, _>(
-            &device::stream_config(channels),
+            &device::stream_config(channels, rate),
             // SACRED: non-blocking ring pop (+ silence on underrun) only.
             move |data: &mut [f32], _| source.fill(data),
             move |err| error!("playback stream: {err}"),
@@ -336,11 +385,13 @@ fn describe_device(device: &Option<Device>) -> String {
     }
 }
 
-fn channels_label(channels: Option<u16>) -> &'static str {
+/// Device stream label for the summary, e.g. `  [44100 Hz, mono]` (empty if the
+/// role is disabled). A rate other than 48000 means vox is resampling (M9).
+fn stream_label(channels: Option<u16>, rate: u32) -> String {
     match channels {
-        Some(1) => "  [mono]",
-        Some(2) => "  [stereo]",
-        Some(_) => "  [multi]",
-        None => "",
+        Some(1) => format!("  [{rate} Hz, mono]"),
+        Some(2) => format!("  [{rate} Hz, stereo]"),
+        Some(n) => format!("  [{rate} Hz, {n} ch]"),
+        None => String::new(),
     }
 }

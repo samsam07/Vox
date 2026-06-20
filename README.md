@@ -86,9 +86,10 @@ Cross-compiling from Fedora is a later-phase convenience.
 ## Status
 
 Phase 1 MVP complete — usable daily for its purpose: full-duplex LAN voice with a
-clap CLI + TOML config and a live TUI. Phase 2 (FEC, reconnection robustness,
-non-48k resampling, Linux client) and packaging for third parties come next; see
-[`docs/PLAN.md`](docs/PLAN.md) for milestones.
+clap CLI + TOML config and a live TUI. Phase 2 in progress: in-band FEC + graceful
+loss, reconnection robustness + jitter recentering, and non-48k device resampling
+are done; drift compensation / adaptive jitter and the Linux client come next, then
+packaging for third parties. See [`docs/PLAN.md`](docs/PLAN.md) for milestones.
 
 ## Scope
 

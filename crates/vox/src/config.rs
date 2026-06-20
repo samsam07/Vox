@@ -2,14 +2,13 @@
 
 use std::io::Write;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::cli::Cli;
 
 /// VOX_DEFAULT_PORT (DESIGN §6).
 pub const DEFAULT_PORT: u16 = 9680;
-const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_BITRATE: i32 = 24_000;
 const DEFAULT_JITTER_MS: u32 = 100;
 const DEFAULT_FEC: bool = true;
@@ -43,6 +42,9 @@ pub struct Config {
     pub playback: String,
     pub capture_channels: Option<u16>,
     pub playback_channels: Option<u16>,
+    /// Device sample rates (Hz); `None` → auto (prefer 48 kHz, else device native).
+    pub capture_sample_rate: Option<u32>,
+    pub playback_sample_rate: Option<u32>,
     pub bitrate: i32,
     pub fec: bool,
     pub expected_loss: u8,
@@ -64,19 +66,6 @@ impl Config {
             None => FileConfig::default(),
         };
 
-        let capture_sample_rate = cli
-            .capture_sample_rate
-            .or(file.capture_sample_rate)
-            .unwrap_or(DEFAULT_SAMPLE_RATE);
-        let playback_sample_rate = cli
-            .playback_sample_rate
-            .or(file.playback_sample_rate)
-            .unwrap_or(DEFAULT_SAMPLE_RATE);
-        if capture_sample_rate != DEFAULT_SAMPLE_RATE || playback_sample_rate != DEFAULT_SAMPLE_RATE
-        {
-            bail!("Phase 1 is 48 kHz only; non-48 kHz needs the Phase-2 resampler");
-        }
-
         Ok(Config {
             peer: cli.peer.or(file.peer),
             bind: cli.bind.or(file.bind),
@@ -90,6 +79,8 @@ impl Config {
                 .unwrap_or_else(|| "default".into()),
             capture_channels: cli.capture_channels.or(file.capture_channels),
             playback_channels: cli.playback_channels.or(file.playback_channels),
+            capture_sample_rate: cli.capture_sample_rate.or(file.capture_sample_rate),
+            playback_sample_rate: cli.playback_sample_rate.or(file.playback_sample_rate),
             bitrate: cli.bitrate.or(file.bitrate).unwrap_or(DEFAULT_BITRATE),
             fec: cli.fec.or(file.fec).unwrap_or(DEFAULT_FEC),
             expected_loss: cli
@@ -109,24 +100,26 @@ impl Config {
     /// closed pipe.
     pub fn print(&self) {
         let channels = |c: Option<u16>| c.map_or("auto".to_string(), |n| n.to_string());
+        let rate = |r: Option<u32>| r.map_or("auto".to_string(), |n| n.to_string());
+        // Labels mirror the TOML keys verbatim (so they copy-paste); pad to align `=`.
+        let line = |key: &str, value: String| format!("{key:<20} = {value}");
         let lines = [
-            format!(
-                "peer              = {}",
-                self.peer.as_deref().unwrap_or("(none)")
+            line("peer", self.peer.clone().unwrap_or_else(|| "(none)".into())),
+            line(
+                "bind",
+                self.bind.map_or("auto".to_string(), |p| p.to_string()),
             ),
-            format!(
-                "bind              = {}",
-                self.bind.map_or("auto".to_string(), |p| p.to_string())
-            ),
-            format!("capture           = {}", self.capture),
-            format!("playback          = {}", self.playback),
-            format!("capture_channels  = {}", channels(self.capture_channels)),
-            format!("playback_channels = {}", channels(self.playback_channels)),
-            format!("bitrate           = {}", self.bitrate),
-            format!("fec               = {}", self.fec),
-            format!("expected_loss     = {}", self.expected_loss),
-            format!("dtx               = {}", self.dtx),
-            format!("jitter_ms         = {}", self.jitter_ms),
+            line("capture", self.capture.clone()),
+            line("playback", self.playback.clone()),
+            line("capture_channels", channels(self.capture_channels)),
+            line("playback_channels", channels(self.playback_channels)),
+            line("capture_sample_rate", rate(self.capture_sample_rate)),
+            line("playback_sample_rate", rate(self.playback_sample_rate)),
+            line("bitrate", self.bitrate.to_string()),
+            line("fec", self.fec.to_string()),
+            line("expected_loss", self.expected_loss.to_string()),
+            line("dtx", self.dtx.to_string()),
+            line("jitter_ms", self.jitter_ms.to_string()),
         ];
         let mut out = std::io::stdout();
         for l in lines {

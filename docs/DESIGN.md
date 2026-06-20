@@ -82,8 +82,10 @@ shared mutability.
   redundant copy carried in frame N+1, which only works if the jitter buffer held
   N+1 long enough. The buffer (≥ one frame deep, ~100 ms by default) provides that
   look-ahead.
-- MVP is 48 kHz only. Non-48k capture/playback requires a resampler — `[PHASE-2]`,
-  shares its resampler with drift compensation.
+- The wire/codec is always 48 kHz. A device that doesn't run at 48 kHz is opened at
+  its native rate and resampled at the edge (M9, `rubato`): capture rate → 48 kHz
+  before encode, 48 kHz → playback rate after decode. A 48 kHz device is a
+  passthrough (no resampler). `[PHASE-2]` M10 reuses this seam for drift correction.
 - `[PHASE-2]` evaluate `opus-rs` (pure-Rust Opus) to drop the libopus C build.
   Not for MVP — too new for the latency-critical FEC path.
 
@@ -152,8 +154,9 @@ Keys mirror flags using role naming: `peer`, `bind`, `capture`, `playback`,
 Precedence: flag > TOML > default. See `samples/vox.toml`.
 
 Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
-`*_sample_rate` 48000 (the only valid value in Phase 1), `*_channels`
-auto-negotiated (mono if the device supports it, else stereo), `bitrate` 24000,
+`*_sample_rate` auto (prefer 48 kHz when the device supports it, else its native
+rate + resample — M9), `*_channels` auto-negotiated (mono if the device supports it,
+else stereo), `bitrate` 24000,
 `fec` true, `expected_loss` 10, `dtx` false, `jitter_ms` 100. `fec` /
 `expected_loss` / `dtx` take effect on the encoder as of M7; `expected_loss` only
 applies when `fec` is on.

@@ -20,6 +20,7 @@ use ringbuf::HeapProd;
 
 use crate::audio::{FRAME, MAX_PACKET};
 use crate::packet;
+use crate::resample::Resampler;
 
 /// Frames of gap beyond which we assume a discontinuity (peer restart) and resync
 /// instead of filling silence — ~1 s at 20 ms/frame.
@@ -66,6 +67,7 @@ pub(crate) fn spawn(
     socket: Arc<UdpSocket>,
     channels: usize,
     capacity: usize,
+    playback_rate: u32,
 ) -> Result<ReceiveThread> {
     let decoder = opus::Decoder::new(crate::audio::RATE, opus::Channels::Mono)
         .context("create opus decoder")?;
@@ -74,7 +76,18 @@ pub(crate) fn spawn(
     let thread = {
         let stop = Arc::clone(&stop);
         let stats = Arc::clone(&stats);
-        thread::spawn(move || recv_loop(producer, socket, decoder, channels, capacity, stop, stats))
+        thread::spawn(move || {
+            recv_loop(
+                producer,
+                socket,
+                decoder,
+                channels,
+                capacity,
+                playback_rate,
+                stop,
+                stats,
+            )
+        })
     };
     Ok(ReceiveThread {
         thread,
@@ -84,17 +97,19 @@ pub(crate) fn spawn(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // worker handoff; grouping would obscure, not clarify
 fn recv_loop(
     mut producer: HeapProd<f32>,
     socket: Arc<UdpSocket>,
     decoder: opus::Decoder,
     channels: usize,
     capacity: usize,
+    playback_rate: u32,
     stop: Arc<AtomicBool>,
     stats: Arc<Stats>,
 ) -> Result<()> {
     let mut buf = vec![0u8; packet::HEADER_LEN + MAX_PACKET];
-    let mut receiver = Receiver::new(decoder, channels, capacity);
+    let mut receiver = Receiver::new(decoder, channels, capacity, playback_rate)?;
 
     while !stop.load(Ordering::Acquire) {
         let n = match socket.recv_from(&mut buf) {
@@ -138,9 +153,13 @@ struct Receiver {
     channels: usize,
     /// Next sequence number we expect in order; `None` until the first packet.
     expected: Option<u32>,
-    /// Mono decode scratch (one 20 ms frame).
+    /// 48 kHz mono decode scratch (one 20 ms frame).
     decoded: Vec<f32>,
-    /// Interleaved upmix scratch (one frame × `channels`).
+    /// Resamples decoded 48 kHz mono → the playback device rate (passthrough at 48k).
+    resampler: Resampler,
+    /// Playback-rate mono scratch (the resampler's output).
+    play: Vec<f32>,
+    /// Interleaved upmix scratch (playback-rate frame × `channels`).
     out: Vec<f32>,
     /// Recenter down (drop a frame) when occupancy is at/above this, in samples.
     high_watermark: usize,
@@ -149,19 +168,28 @@ struct Receiver {
 }
 
 impl Receiver {
-    /// `capacity` is the jitter ring's sample capacity; recentering acts at the
-    /// outer quarters (≥¾ full → drop, ≤¼ full → hold) so it leaves the middle
-    /// half — where the buffer normally sits and short-term jitter lives — alone.
-    fn new(decoder: opus::Decoder, channels: usize, capacity: usize) -> Self {
-        Receiver {
+    /// `capacity` is the jitter ring's sample capacity (at the playback rate);
+    /// recentering acts at the outer quarters (≥¾ full → drop, ≤¼ full → hold) so it
+    /// leaves the middle half — where the buffer normally sits and short-term jitter
+    /// lives — alone. Decoded audio is resampled 48 kHz → `playback_rate` before it
+    /// is enqueued (a passthrough at 48 kHz).
+    fn new(
+        decoder: opus::Decoder,
+        channels: usize,
+        capacity: usize,
+        playback_rate: u32,
+    ) -> Result<Self> {
+        Ok(Receiver {
             decoder,
             channels,
             expected: None,
             decoded: vec![0.0f32; FRAME],
+            resampler: Resampler::new(crate::audio::RATE, playback_rate)?,
+            play: Vec::with_capacity(FRAME * 2),
             out: Vec::with_capacity(FRAME * channels),
             high_watermark: capacity * 3 / 4,
             low_watermark: capacity / 4,
-        }
+        })
     }
 
     /// Handle one parsed packet, using wrap-aware sequence comparison (DESIGN §5) to
@@ -230,9 +258,9 @@ impl Receiver {
             stats.recenter_drops.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        self.push(samples, producer, stats);
+        self.push(samples, producer, stats)?;
         if producer.occupied_len() <= self.low_watermark {
-            self.push(samples, producer, stats);
+            self.push(samples, producer, stats)?;
             stats.recenter_inserts.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -249,8 +277,7 @@ impl Receiver {
             .decoder
             .decode_float(payload, &mut self.decoded, true)
             .context("opus fec decode")?;
-        self.push(samples, producer, stats);
-        Ok(())
+        self.push(samples, producer, stats)
     }
 
     /// Conceal one lost frame with Opus PLC (decode with an empty packet).
@@ -259,15 +286,18 @@ impl Receiver {
             .decoder
             .decode_float(&[], &mut self.decoded, false)
             .context("opus plc decode")?;
-        self.push(samples, producer, stats);
-        Ok(())
+        self.push(samples, producer, stats)
     }
 
-    /// Upmix the freshly decoded mono frame to `channels` and enqueue it; a full
-    /// jitter buffer drops the excess (overrun → glitch, DESIGN §3).
-    fn push(&mut self, samples: usize, producer: &mut HeapProd<f32>, stats: &Stats) {
+    /// Resample the freshly decoded 48 kHz mono frame to the playback rate, upmix to
+    /// `channels`, and enqueue it; a full jitter buffer drops the excess (overrun →
+    /// glitch, DESIGN §3).
+    fn push(&mut self, samples: usize, producer: &mut HeapProd<f32>, stats: &Stats) -> Result<()> {
+        self.play.clear();
+        self.resampler
+            .process(&self.decoded[..samples], &mut self.play)?;
         self.out.clear();
-        for &sample in &self.decoded[..samples] {
+        for &sample in &self.play {
             for _ in 0..self.channels {
                 self.out.push(sample);
             }
@@ -276,6 +306,7 @@ impl Receiver {
         if pushed < self.out.len() {
             stats.overruns.fetch_add(1, Ordering::Relaxed);
         }
+        Ok(())
     }
 }
 
@@ -283,6 +314,7 @@ impl Receiver {
 mod tests {
     use super::{Receiver, Stats, MAX_GAP_FRAMES};
     use crate::audio::{FRAME, MAX_PACKET, RATE};
+    use crate::resample::Resampler;
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
 
@@ -291,12 +323,15 @@ mod tests {
 
     /// Build a `Receiver` with explicit watermarks so tests target the recentering
     /// thresholds directly — or disable recentering with `high = usize::MAX, low = 0`.
+    /// Playback stays at 48 kHz, so the resampler is a passthrough.
     fn make_receiver(channels: usize, high_watermark: usize, low_watermark: usize) -> Receiver {
         Receiver {
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
             channels,
             expected: None,
             decoded: vec![0.0f32; FRAME],
+            resampler: Resampler::Passthrough,
+            play: Vec::with_capacity(FRAME),
             out: Vec::with_capacity(FRAME * channels),
             high_watermark,
             low_watermark,

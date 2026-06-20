@@ -71,10 +71,10 @@ pub struct Cli {
     /// Local play device: none | default | "exact name". none = send-only.
     #[arg(long)]
     pub playback: Option<String>,
-    /// Capture sample rate (Phase 1: 48000 only).
+    /// Capture device rate, Hz (omit = auto: prefer 48000, else native + resample).
     #[arg(long = "capture-sample-rate")]
     pub capture_sample_rate: Option<u32>,
-    /// Playback sample rate (Phase 1: 48000 only).
+    /// Playback device rate, Hz (omit = auto: prefer 48000, else native + resample).
     #[arg(long = "playback-sample-rate")]
     pub playback_sample_rate: Option<u32>,
     /// Force capture channels (omit = auto-negotiate mono, else stereo).

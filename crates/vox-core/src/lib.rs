@@ -14,6 +14,7 @@ mod engine;
 mod net;
 pub mod packet;
 mod receive;
+mod resample;
 mod send;
 
 pub use engine::{AudioPorts, CaptureSink, Engine, EngineConfig, EngineStats, PlaybackSource};

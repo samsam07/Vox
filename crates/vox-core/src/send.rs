@@ -15,6 +15,7 @@ use ringbuf::HeapCons;
 
 use crate::audio::{FRAME, MAX_PACKET, RATE};
 use crate::packet;
+use crate::resample::Resampler;
 
 pub(crate) struct SendThread {
     thread: JoinHandle<Result<()>>,
@@ -47,8 +48,12 @@ pub(crate) fn spawn(
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     channels: usize,
+    capture_rate: u32,
     params: EncoderParams,
 ) -> Result<SendThread> {
+    // Resample the downmixed capture-rate mono up to the 48 kHz wire rate before
+    // encode (a passthrough when the device already runs at 48 kHz) — DESIGN §4.
+    let resampler = Resampler::new(capture_rate, RATE)?;
     let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
         .context("create opus encoder")?;
     encoder
@@ -87,6 +92,7 @@ pub(crate) fn spawn(
                 socket,
                 peer,
                 encoder,
+                resampler,
                 channels,
                 stop,
                 packets,
@@ -108,6 +114,7 @@ struct SendLoop {
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
     encoder: opus::Encoder,
+    resampler: Resampler,
     channels: usize,
     stop: Arc<AtomicBool>,
     packets: Arc<AtomicU64>,
@@ -120,6 +127,7 @@ fn send_loop(ctx: SendLoop) -> Result<()> {
         socket,
         peer,
         mut encoder,
+        mut resampler,
         channels,
         stop,
         packets,
@@ -127,7 +135,8 @@ fn send_loop(ctx: SendLoop) -> Result<()> {
     } = ctx;
     let mut read = vec![0.0f32; 4096];
     let mut interleaved: Vec<f32> = Vec::with_capacity(8192); // < channels leftover
-    let mut mono: Vec<f32> = Vec::with_capacity(FRAME * 4); // < FRAME leftover
+    let mut mono: Vec<f32> = Vec::with_capacity(FRAME * 4); // capture-rate downmix
+    let mut wire: Vec<f32> = Vec::with_capacity(FRAME * 4); // 48 kHz, encoded by frame
     let mut datagram = vec![0u8; packet::HEADER_LEN + MAX_PACKET];
     let mut seq: u32 = 0;
     let mut timestamp: u32 = 0;
@@ -141,19 +150,22 @@ fn send_loop(ctx: SendLoop) -> Result<()> {
             continue;
         }
 
-        // Downmix each complete interleaved frame to one mono sample.
+        // Downmix each complete interleaved frame to one capture-rate mono sample.
         interleaved.extend_from_slice(&read[..n]);
         let complete = interleaved.len() / channels;
+        mono.clear();
         for i in 0..complete {
             let frame = &interleaved[i * channels..(i + 1) * channels];
             mono.push(frame.iter().sum::<f32>() / channels as f32);
         }
         interleaved.drain(..complete * channels);
 
-        // Encode and send whole 20 ms mono frames.
-        while mono.len() >= FRAME {
+        // Resample capture-rate mono → 48 kHz wire samples (the resampler buffers
+        // sub-chunk remainders internally), then encode whole 20 ms frames.
+        resampler.process(&mono, &mut wire)?;
+        while wire.len() >= FRAME {
             let bytes = encoder
-                .encode_float(&mono[..FRAME], &mut datagram[packet::HEADER_LEN..])
+                .encode_float(&wire[..FRAME], &mut datagram[packet::HEADER_LEN..])
                 .context("opus encode")?;
             packet::write_header(seq, timestamp, &mut datagram[..packet::HEADER_LEN]);
             match socket.send_to(&datagram[..packet::HEADER_LEN + bytes], peer) {
@@ -180,7 +192,7 @@ fn send_loop(ctx: SendLoop) -> Result<()> {
 
             seq = seq.wrapping_add(1);
             timestamp = timestamp.wrapping_add(FRAME as u32);
-            mono.drain(..FRAME);
+            wire.drain(..FRAME);
         }
     }
     Ok(())

@@ -9,7 +9,8 @@ use anyhow::{anyhow, bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, Device, Host, SampleRate, StreamConfig};
 
-/// MVP sample rate (DESIGN §4: 48 kHz only).
+/// The wire/codec rate (DESIGN §4). Preferred when a device supports it (no
+/// resampling); otherwise vox opens the device's native rate and resamples (M9).
 pub const RATE: u32 = 48_000;
 
 /// Local device role. Capture = input/record, playback = output/play.
@@ -122,31 +123,60 @@ fn find_by_name(host: &Host, role: Role, name: &str) -> Result<Device> {
         .ok_or_else(|| anyhow!("no {} device named {:?}", role.label(), name))
 }
 
-/// A 48 kHz cpal stream config at the given channel count.
-pub fn stream_config(channels: u16) -> StreamConfig {
+/// A cpal stream config at the given channel count and sample rate.
+pub fn stream_config(channels: u16, rate: u32) -> StreamConfig {
     StreamConfig {
         channels,
-        sample_rate: SampleRate(RATE),
+        sample_rate: SampleRate(rate),
         buffer_size: BufferSize::Default,
     }
 }
 
-/// Pick mono if the device can open it at 48 kHz / f32, else stereo (DESIGN §4).
-pub fn pick_channels(device: &Device, role: Role) -> Result<u16> {
+/// Choose the device's operating rate: an explicit `forced` rate (must be
+/// supported); else 48 kHz when the device offers it (the no-resample fast path);
+/// else the device's native default rate (vox resamples to/from 48 kHz — M9).
+pub fn pick_sample_rate(device: &Device, role: Role, forced: Option<u32>) -> Result<u32> {
+    if let Some(rate) = forced {
+        if supports_rate(device, role, rate) {
+            return Ok(rate);
+        }
+        bail!("{} device does not support {} Hz", role.label(), rate);
+    }
+    if supports_rate(device, role, RATE) {
+        return Ok(RATE);
+    }
+    let default = match role {
+        Role::Capture => device.default_input_config(),
+        Role::Playback => device.default_output_config(),
+    }
+    .map_err(|e| anyhow!("query default {} config: {e}", role.label()))?;
+    Ok(default.sample_rate().0)
+}
+
+/// Whether the device can open `rate` at f32 mono or stereo.
+fn supports_rate(device: &Device, role: Role, rate: u32) -> bool {
+    [1u16, 2]
+        .iter()
+        .any(|&ch| can_build(device, role, ch, rate))
+}
+
+/// Pick mono if the device can open it at `rate` / f32, else stereo (DESIGN §4).
+pub fn pick_channels(device: &Device, role: Role, rate: u32) -> Result<u16> {
     for channels in [1u16, 2] {
-        if can_build(device, role, channels) {
+        if can_build(device, role, channels, rate) {
             return Ok(channels);
         }
     }
     bail!(
-        "{} device offers no 48 kHz f32 mono or stereo config",
-        role.label()
+        "{} device offers no {} Hz f32 mono or stereo config",
+        role.label(),
+        rate
     )
 }
 
-fn can_build(device: &Device, role: Role, channels: u16) -> bool {
+fn can_build(device: &Device, role: Role, channels: u16, rate: u32) -> bool {
     // Probe by building a throwaway stream — WASAPI under-reports supported configs.
-    let config = stream_config(channels);
+    let config = stream_config(channels, rate);
     match role {
         Role::Capture => device
             .build_input_stream::<f32, _, _>(

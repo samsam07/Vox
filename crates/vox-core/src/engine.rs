@@ -21,6 +21,12 @@ pub struct EngineConfig {
     pub bind: Option<u16>,
     pub capture_channels: Option<u16>,
     pub playback_channels: Option<u16>,
+    /// Capture device sample rate (Hz); the send path resamples it up to 48 kHz.
+    /// Unused when capture is disabled.
+    pub capture_sample_rate: u32,
+    /// Playback device sample rate (Hz); the receive path resamples 48 kHz down/up
+    /// to it. Unused when playback is disabled.
+    pub playback_sample_rate: u32,
     pub jitter_ms: u32,
     pub bitrate: i32,
     /// In-band FEC on the send path (DESIGN §4, §7).
@@ -112,13 +118,18 @@ impl Engine {
 
         let (sender, capture) = match (config.capture_channels, config.peer) {
             (Some(channels), Some(peer)) => {
-                let ring = HeapRb::<f32>::new(ring_capacity(CAPTURE_RING_MS, channels));
+                let ring = HeapRb::<f32>::new(ring_capacity(
+                    config.capture_sample_rate,
+                    CAPTURE_RING_MS,
+                    channels,
+                ));
                 let (producer, consumer) = ring.split();
                 let thread = send::spawn(
                     consumer,
                     Arc::clone(&socket),
                     peer,
                     channels as usize,
+                    config.capture_sample_rate,
                     send::EncoderParams {
                         bitrate: config.bitrate,
                         fec: config.fec,
@@ -134,14 +145,20 @@ impl Engine {
 
         let (receiver, playback) = match config.playback_channels {
             Some(channels) => {
-                let capacity = ring_capacity(config.jitter_ms, channels);
+                let capacity =
+                    ring_capacity(config.playback_sample_rate, config.jitter_ms, channels);
                 let ring = HeapRb::<f32>::new(capacity);
                 let (mut producer, consumer) = ring.split();
                 // Prefill a look-ahead cushion so playback starts smoothly and
                 // short-term jitter is absorbed (and FEC gets its look-ahead — §4).
                 producer.push_slice(&vec![0.0f32; capacity / 2]);
-                let thread =
-                    receive::spawn(producer, Arc::clone(&socket), channels as usize, capacity)?;
+                let thread = receive::spawn(
+                    producer,
+                    Arc::clone(&socket),
+                    channels as usize,
+                    capacity,
+                    config.playback_sample_rate,
+                )?;
                 (Some(thread), Some(PlaybackSource { consumer }))
             }
             None => (None, None),
