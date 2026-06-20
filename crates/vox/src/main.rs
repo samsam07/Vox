@@ -11,6 +11,7 @@ mod cli;
 mod config;
 mod device;
 mod logging;
+mod timer;
 mod tui;
 
 use std::net::SocketAddr;
@@ -106,6 +107,10 @@ fn main() -> Result<()> {
         (true, None) => Some(DEFAULT_PORT),
         (false, None) => None,
     };
+
+    // Finer process timer for the session → smoother send pacing, less jitter
+    // (Windows only; restored on drop). Held until main returns.
+    let _timer = timer::TimerResolution::highest();
 
     let (engine, ports) = Engine::start(EngineConfig {
         peer,

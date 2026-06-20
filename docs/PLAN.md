@@ -161,6 +161,14 @@ Why shelved (fix these before reviving):
   or auto-engage only when drift actually accumulates (keep the 48 kHz passthrough
   otherwise); consider a fixed-output resampler to remove the chunking lumpiness; and
   pair it with adaptive jitter (M10) so jitter is handled separately.
+### M13e — `[PHASE-3]` cpal buffer-size tuning — possible jitter optimization
+Request a smaller fixed cpal buffer instead of `BufferSize::Default` (often ~10 ms),
+so the capture/playback callbacks deliver/consume audio in finer chunks → less
+chunking jitter feeding the rings. Portable (WASAPI + ALSA/PipeWire). Risk: too-small
+buffers cause xruns/instability and vary by device, so it needs a safe floor and
+per-device validation. Deferred from the M10-era jitter work: the `timeBeginPeriod`
+half (committed) showed self-inflicted *timing* jitter is minor here, so this is
+speculative — revisit only if a link proves chunking-bound.
 ### M14 — `[PHASE-3]` Android front-end on `vox-core` (Oboe/AAudio + JNI/uniffi, libopus via NDK) — walkie-talkie app.
 ### M15 — `[PHASE-3]` Encryption
 Optional authenticated encryption of the UDP payload (e.g. ChaCha20-Poly1305 with a
