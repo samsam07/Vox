@@ -10,7 +10,7 @@ use crate::cli::Cli;
 /// VOX_DEFAULT_PORT (DESIGN §6).
 pub const DEFAULT_PORT: u16 = 9680;
 const DEFAULT_BITRATE: i32 = 24_000;
-const DEFAULT_JITTER_MS: u32 = 100;
+const DEFAULT_JITTER_MS: u32 = 150;
 const DEFAULT_FEC: bool = false;
 const DEFAULT_EXPECTED_LOSS: u8 = 10;
 const DEFAULT_DTX: bool = false;

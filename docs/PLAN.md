@@ -101,21 +101,25 @@ Non-48k devices via a resampler (`rubato`). Lifts the 48k-only constraint.
 - Done: edge resampling (capture→48k, 48k→playback), passthrough at 48 kHz; rate
   auto-selection (prefer 48 kHz, else native). Verified on a non-48 kHz device.
 
-### M10 — `[PHASE-2]` adaptive jitter (was: drift compensation + adaptive jitter)
+### M10 — `[PHASE-2]` adaptive jitter — ✅ COMPLETE
 Originally drift compensation (resampling) + adaptive buffer sizing. The
-resampling-drift half was built (M10p1) and **shelved** after machine-to-machine
-testing: it taxed the common 48 kHz path (always-on resampler) without reducing the
-real-world recenter, because **jitter, not drift, dominates** on actual links. So
-M10 is reframed as **adaptive jitter sizing** — measure arrival jitter and size the
-buffer/target to it (lower latency on clean links, more slack on bursty ones). M10p1
-is stashed; we may gate it behind an opt-in `--drift-correct` flag (default off) for
-drift-heavy long sessions, decided per need.
+resampling-drift half was built (M10p1) and **shelved** (dropped; design preserved in
+M13d) after machine-to-machine testing: it taxed the common 48 kHz path without
+reducing real-world recenter, because **jitter, not drift, dominates** on actual
+links. So M10 became **adaptive jitter sizing**: the receive thread measures arrival
+jitter (RFC3550, from the carried `timestamp`) and sizes a centre depth + band to it,
+gliding the recenter watermarks (fast-attack / slow-release). `jitter-ms` is now the
+depth ceiling (default 150 ms; adaptive below it).
+- Done: verified machine-to-machine — recenter fell from ~116/499 to ~3/8, audio
+  clean. TUI shows live buffered latency + the adaptive `target`. The residual is
+  slow drift (buffer creeps high over a session) → M13d (Phase 3) is the seamless fix
+  and would also drop latency from ~ceiling to ~target.
 
 Phase-2 tuning that came out of M10 testing (smaller fixes, done ahead of M10
 proper): `fec` default reverted to **off** (it costs primary-signal quality + adds
-jitter; only helps on lossy links — see DESIGN §4); recenter watermarks widened from
-¾/¼ to ⅞/⅛ (near-rail backstop, not a centering force, so it stops cutting off on
-normal jitter); a codec/config line added to the TUI Status panel.
+jitter; only helps on lossy links — see DESIGN §4); recenter watermarks widened to a
+near-rail/adaptive backstop so they stop cutting off on normal jitter; Windows timer
+resolution raised to 1 ms; TUI codec/config line.
 
 ### M11 — Fedora native build + Linux client
 Bring up native Linux build (`alsa-lib-devel`); validate Windows↔Linux. Re-run the

@@ -39,19 +39,19 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
 - Capture ring: SPSC lock-free (`ringbuf`/`rtrb`). Writer = capture callback;
   reader = send thread.
 - Jitter buffer (receive side): writer = receive thread; reader = playback
-  callback. Fixed ring, ~100 ms default, CLI-tunable (`jitter-ms`) — a clean wired
-  LAN can go lower; a WiFi leg or Windows scheduling burst needs more. (M8/M10 make
-  this adaptive; until then the default is sized for the common Windows/WiFi case,
-  not the best case.)
+  callback. The ring is sized to `jitter-ms` (the depth **ceiling**, default 150 ms),
+  but the **operating depth is adaptive** (M10): the receive thread measures network
+  jitter (RFC3550, from the carried packet `timestamp`) and sizes a centre depth +
+  band to it — shallow (low latency) on a clean link, deeper (more slack) on a bursty
+  one. So `jitter-ms` is a max, not a fixed depth; vox runs below it when it can.
   - Overrun → drop. Underrun → insert silence / Opus PLC frame.
-  - Handles short-term network jitter. Does NOT fully handle long-term clock drift
-    between the independent capture/playback/peer clocks — over a long session the
-    buffer slowly fills or drains. M8 adds a recentering stopgap: the receive thread
-    drops one in-order frame when occupancy sits high (≥¾) and repeats one when it
-    sits low (≤¼) — no resampler, just an occasional single-frame correction on the
-    in-order path (loss concealment is never dropped). This blunts the drift
-    glitching but coarsely (a 20 ms skip/repeat); `[PHASE-2]` M10 replaces it with
-    smooth resampling-based drift compensation.
+  - The recenter drop/hold (M8) is the band's edge enforcement: drop one in-order
+    frame above the adaptive high watermark, repeat one below the low (loss
+    concealment is never dropped). With the band sized to the jitter, normal swings
+    free-run inside it without a (cutoff-causing) correction; only slow clock drift
+    occasionally reaches an edge. Long-term drift is otherwise **not** smoothly
+    corrected — `[PHASE-3]` M13d (shelved resampling) is the seamless fix; the coarse
+    20 ms drop/hold is the accepted stopgap for the rare drift event.
 
 Single-owner discipline is enforced by the borrow checker. Do not defeat it with
 shared mutability.
@@ -162,7 +162,8 @@ Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
 `*_sample_rate` auto (prefer 48 kHz when the device supports it, else its native
 rate + resample — M9), `*_channels` auto-negotiated (mono if the device supports it,
 else stereo), `bitrate` 24000,
-`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 100. `fec` /
+`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 150 (a ceiling; vox adapts
+below it). `fec` /
 `expected_loss` / `dtx` take effect on the encoder as of M7; `expected_loss` only
 applies when `fec` is on.
 

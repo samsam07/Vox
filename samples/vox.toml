@@ -30,4 +30,4 @@ expected_loss = 10      # % loss to tune FEC for (~5-10%). Only used when fec = 
 dtx           = false   # discontinuous transmission (silence suppression).
 
 # --- Receive-path ---
-jitter_ms = 100         # jitter buffer depth (default; lower on wired LAN, higher on WiFi).
+jitter_ms = 150         # MAX jitter-buffer depth; vox adapts below it to measured jitter.

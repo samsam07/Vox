@@ -102,6 +102,10 @@ pub struct EngineStats {
     /// Current jitter-buffer occupancy and capacity, in samples.
     pub jitter_fill: u64,
     pub jitter_capacity: u64,
+    /// Live buffered latency (occupancy) in ms.
+    pub jitter_fill_ms: u64,
+    /// Current adaptive target buffer depth, in ms (M10).
+    pub target_depth_ms: u64,
 }
 
 impl Engine {
@@ -149,9 +153,15 @@ impl Engine {
                     ring_capacity(config.playback_sample_rate, config.jitter_ms, channels);
                 let ring = HeapRb::<f32>::new(capacity);
                 let (mut producer, consumer) = ring.split();
-                // Prefill a look-ahead cushion so playback starts smoothly and
-                // short-term jitter is absorbed (and FEC gets its look-ahead — §4).
-                producer.push_slice(&vec![0.0f32; capacity / 2]);
+                // Prefill to the adaptive initial depth (the zero-jitter band centre)
+                // so playback starts smoothly and FEC gets its look-ahead (§4); M10's
+                // controller then resizes the band from there.
+                let prefill = crate::jitter::initial_depth(
+                    config.playback_sample_rate,
+                    channels as usize,
+                    capacity,
+                );
+                producer.push_slice(&vec![0.0f32; prefill]);
                 let thread = receive::spawn(
                     producer,
                     Arc::clone(&socket),
@@ -196,6 +206,8 @@ impl Engine {
             stats.recenter_inserts = receiver.stats.recenter_inserts.load(Ordering::Relaxed);
             stats.jitter_fill = receiver.stats.jitter_fill.load(Ordering::Relaxed);
             stats.jitter_capacity = receiver.capacity as u64;
+            stats.jitter_fill_ms = receiver.stats.jitter_fill_ms.load(Ordering::Relaxed);
+            stats.target_depth_ms = receiver.stats.target_depth_ms.load(Ordering::Relaxed);
         }
         stats
     }

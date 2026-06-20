@@ -13,12 +13,14 @@ use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
 use crate::audio::{FRAME, MAX_PACKET};
+use crate::jitter::{adaptive_watermarks, ease, JitterEstimator};
 use crate::packet;
 use crate::resample::Resampler;
 
@@ -42,6 +44,10 @@ pub(crate) struct Stats {
     pub(crate) recenter_inserts: AtomicU64,
     /// Current jitter-buffer occupancy in samples (instantaneous, not cumulative).
     pub(crate) jitter_fill: AtomicU64,
+    /// The same occupancy as a buffered-latency figure in ms (the live depth).
+    pub(crate) jitter_fill_ms: AtomicU64,
+    /// Current adaptive target buffer depth, in ms (M10) — the centre the band tracks.
+    pub(crate) target_depth_ms: AtomicU64,
 }
 
 pub(crate) struct ReceiveThread {
@@ -135,11 +141,15 @@ fn recv_loop(
         stats.received.fetch_add(1, Ordering::Relaxed);
         stats.bytes.fetch_add(n as u64, Ordering::Relaxed);
 
+        receiver.observe_arrival(Instant::now(), pkt.timestamp, &stats);
         receiver.accept(pkt.seq, pkt.payload, &mut producer, &stats)?;
 
+        let occupied = producer.occupied_len() as u64;
+        stats.jitter_fill.store(occupied, Ordering::Relaxed);
+        let per_ms = (playback_rate as u64 * channels as u64).max(1);
         stats
-            .jitter_fill
-            .store(producer.occupied_len() as u64, Ordering::Relaxed);
+            .jitter_fill_ms
+            .store(occupied * 1000 / per_ms, Ordering::Relaxed);
     }
     Ok(())
 }
@@ -165,21 +175,30 @@ struct Receiver {
     high_watermark: usize,
     /// Recenter up (repeat a frame) when occupancy is at/below this, in samples.
     low_watermark: usize,
+    /// Smoothed network jitter; drives the adaptive watermarks (M10).
+    jitter: JitterEstimator,
+    /// Playback rate and ring capacity, for recomputing the adaptive watermarks.
+    playback_rate: u32,
+    capacity: usize,
 }
 
 impl Receiver {
-    /// `capacity` is the jitter ring's sample capacity (at the playback rate).
-    /// Recentering acts only at the outer eighths (≥⅞ full → drop, ≤⅛ full → hold),
-    /// so it is a near-rail backstop against drift/overrun, not a centering force —
-    /// the wide middle band absorbs normal jitter without a (cutoff-causing) frame
-    /// drop/hold. Decoded audio is resampled 48 kHz → `playback_rate` before it is
-    /// enqueued (a passthrough at 48 kHz).
+    /// `capacity` is the jitter ring's sample capacity (the depth ceiling). The
+    /// recenter watermarks are **adaptive** (M10): [`observe_arrival`] sizes them to
+    /// the measured jitter so the band fits the link — shallow (low latency) when
+    /// clean, deeper (more slack) when bursty — and the drop/hold acts only at those
+    /// (jitter-sized, drift-rare) edges. Decoded audio is resampled 48 kHz →
+    /// `playback_rate` before it is enqueued (a passthrough at 48 kHz).
+    ///
+    /// [`observe_arrival`]: Receiver::observe_arrival
     fn new(
         decoder: opus::Decoder,
         channels: usize,
         capacity: usize,
         playback_rate: u32,
     ) -> Result<Self> {
+        let (low_watermark, high_watermark) =
+            adaptive_watermarks(0.0, playback_rate, channels, capacity);
         Ok(Receiver {
             decoder,
             channels,
@@ -188,9 +207,29 @@ impl Receiver {
             resampler: Resampler::new(crate::audio::RATE, playback_rate)?,
             play: Vec::with_capacity(FRAME * 2),
             out: Vec::with_capacity(FRAME * channels),
-            high_watermark: capacity * 7 / 8,
-            low_watermark: capacity / 8,
+            high_watermark,
+            low_watermark,
+            jitter: JitterEstimator::new(),
+            playback_rate,
+            capacity,
         })
+    }
+
+    /// Fold a packet arrival into the jitter estimate and resize the recenter band to
+    /// it (M10). Called from the recv loop per datagram (before `accept`), so unit
+    /// tests that drive `accept` directly keep their explicit, fixed watermarks.
+    fn observe_arrival(&mut self, now: Instant, timestamp: u32, stats: &Stats) {
+        let jitter = self.jitter.update(now, timestamp);
+        let (target_low, target_high) =
+            adaptive_watermarks(jitter, self.playback_rate, self.channels, self.capacity);
+        // Glide toward the target so the band doesn't jiggle per packet (fast to
+        // deepen, slow to shrink).
+        self.low_watermark = ease(self.low_watermark, target_low);
+        self.high_watermark = ease(self.high_watermark, target_high);
+        // Report the band centre as a depth in ms (per-channel samples / rate).
+        let centre = (self.low_watermark + self.high_watermark) / 2;
+        let ms = centre as u64 * 1000 / (self.playback_rate as u64 * self.channels as u64).max(1);
+        stats.target_depth_ms.store(ms, Ordering::Relaxed);
     }
 
     /// Handle one parsed packet, using wrap-aware sequence comparison (DESIGN §5) to
@@ -313,7 +352,7 @@ impl Receiver {
 
 #[cfg(test)]
 mod tests {
-    use super::{Receiver, Stats, MAX_GAP_FRAMES};
+    use super::{JitterEstimator, Receiver, Stats, MAX_GAP_FRAMES};
     use crate::audio::{FRAME, MAX_PACKET, RATE};
     use crate::resample::Resampler;
     use std::collections::HashSet;
@@ -336,6 +375,11 @@ mod tests {
             out: Vec::with_capacity(FRAME * channels),
             high_watermark,
             low_watermark,
+            // Adaptation is driven by `observe_arrival`, which these tests don't call,
+            // so the explicit watermarks above stand. These fields are inert here.
+            jitter: JitterEstimator::new(),
+            playback_rate: RATE,
+            capacity: 0,
         }
     }
 

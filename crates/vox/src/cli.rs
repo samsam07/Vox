@@ -100,7 +100,8 @@ pub struct Cli {
     pub dtx: Option<bool>,
 
     // --- Receive-path ---
-    /// Jitter buffer depth, ms (default 100; lower on a clean wired LAN, higher on WiFi).
+    /// Max jitter-buffer depth, ms (the ceiling; vox adapts the depth below it to
+    /// measured jitter — default 150).
     #[arg(long = "jitter-ms")]
     pub jitter_ms: Option<u32>,
 

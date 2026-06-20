@@ -192,7 +192,11 @@ fn draw(
         .block(rounded("Jitter buffer"))
         .gauge_style(Style::new().fg(jcolor))
         .ratio(jratio)
-        .label(format!("{:.0}%", jratio * 100.0));
+        .label(format!(
+            "{:.0}%  ·  {} ms",
+            jratio * 100.0,
+            stats.jitter_fill_ms
+        ));
     frame.render_widget(jitter, jitter_a);
 
     // Quality.
@@ -224,6 +228,11 @@ fn draw(
                 stats.recenter_drops, stats.recenter_inserts
             ),
             recenter_color,
+        ),
+        qline(
+            "target",
+            format!("{} ms (adaptive)", stats.target_depth_ms),
+            None,
         ),
     ])
     .block(rounded("Quality"));
