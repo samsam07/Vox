@@ -1,7 +1,7 @@
 //! vox UDP wire format (DESIGN §5): an 8-byte big-endian header followed by one
-//! Opus payload. Header is `seq` (u32) then `timestamp` (u32, sample count). The
-//! timestamp is carried for Phase-2 clock-drift/playout work; the MVP receiver
-//! reads only `seq`.
+//! Opus payload. Header is `seq` (u32) then `timestamp` (u32, sample count). `seq`
+//! drives gap/ordering; `timestamp` gives the expected inter-arrival spacing the
+//! receiver's adaptive jitter estimator compares against (M10).
 
 /// Size of the fixed header in bytes.
 pub const HEADER_LEN: usize = 8;
@@ -9,9 +9,8 @@ pub const HEADER_LEN: usize = 8;
 /// A parsed datagram: header fields plus a borrowed view of the payload.
 pub struct Packet<'a> {
     pub seq: u32,
-    // Parsed from the wire but not consumed by the MVP receiver; Phase-2 clock-drift
-    // / playout scheduling will read it (DESIGN §5).
-    #[allow(dead_code)]
+    /// Sample count of the frame's first sample. The receiver reads it for adaptive
+    /// jitter estimation (expected inter-arrival spacing — M10, DESIGN §5).
     pub timestamp: u32,
     pub payload: &'a [u8],
 }

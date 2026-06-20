@@ -1,7 +1,7 @@
 //! Adaptive jitter-buffer sizing (M10, DESIGN §3): measure network jitter and size
 //! the buffer's operating band to it — shallow (low latency) on clean links, deeper
 //! (more slack) on bursty ones — so normal arrival jitter stops tripping the recenter
-//! drop/hold. Slow clock drift is out of scope here (see PLAN M13d); the band is
+//! drop/hold. Slow clock drift is out of scope here (see PLAN M10b); the band is
 //! sized for jitter, and drift is rare enough that a shallow centre still drops
 //! seldom.
 

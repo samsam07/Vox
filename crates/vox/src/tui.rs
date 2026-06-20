@@ -61,6 +61,10 @@ fn run_loop(
     let mut rate = Rates::default();
     let mut tx_history = vec![0.0f64; HISTORY];
     let mut rx_history = vec![0.0f64; HISTORY];
+    // Buffered-latency history for drift detection (grows to HISTORY, no leading zeros
+    // so the trend isn't skewed at startup).
+    let mut depth_history: Vec<f64> = Vec::new();
+    let mut drift = 0.0f64;
 
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -84,30 +88,61 @@ fn run_loop(
             };
             push(&mut tx_history, rate.tx_kbps);
             push(&mut rx_history, rate.rx_kbps);
+            depth_history.push(now.jitter_fill_ms as f64);
+            if depth_history.len() > HISTORY {
+                depth_history.remove(0);
+            }
+            drift = drift_per_min(&depth_history);
             last = now;
             last_sample = Instant::now();
         }
 
         let stats = engine.stats();
         let uptime = start.elapsed();
-        terminal
-            .draw(|frame| draw(frame, info, &stats, &rate, uptime, &tx_history, &rx_history))?;
+        terminal.draw(|frame| {
+            draw(
+                frame,
+                info,
+                &stats,
+                &rate,
+                drift,
+                uptime,
+                &tx_history,
+                &rx_history,
+            )
+        })?;
     }
     Ok(())
 }
 
+/// Trend (slope) of the buffered-latency history in ms/min — positive means the
+/// jitter buffer is slowly filling, negative draining: the signature of clock drift,
+/// which a steady recenter count alone wouldn't reveal until it hits a rail.
+fn drift_per_min(history: &[f64]) -> f64 {
+    let n = history.len();
+    if n < 20 {
+        return 0.0; // ~10 s minimum before estimating
+    }
+    let half = n / 2;
+    let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+    // Rise between the two halves' centroids (n/2 samples × 0.5 s apart) → per minute.
+    (mean(&history[half..]) - mean(&history[..half])) * 240.0 / n as f64
+}
+
+#[allow(clippy::too_many_arguments)] // a dashboard frame; grouping these would not clarify
 fn draw(
     frame: &mut Frame,
     info: &SessionInfo,
     stats: &EngineStats,
     rate: &Rates,
+    drift: f64,
     uptime: Duration,
     tx_history: &[f64],
     rx_history: &[f64],
 ) {
     let [header_a, mid_a, chart_a, footer_a] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(12),
+        Constraint::Length(13),
         Constraint::Min(6),
         Constraint::Length(1),
     ])
@@ -216,10 +251,12 @@ fn draw(
     let overrun_color = (stats.overruns > 0).then_some(Color::Red);
     let recenter = stats.recenter_drops + stats.recenter_inserts;
     let recenter_color = (recenter > 0).then_some(Color::Yellow);
+    let drift_color = (drift.abs() >= 2.0).then_some(Color::Yellow);
     let quality = Paragraph::new(vec![
         qline("loss", format!("{loss:.1}%"), Some(lcolor)),
         qline("gaps", stats.gap_frames.to_string(), None),
-        qline("drops", stats.dropped_late.to_string(), None),
+        // dropped_late = late/duplicate packets discarded (distinct from a recenter drop).
+        qline("late", stats.dropped_late.to_string(), None),
         qline("overrun", stats.overruns.to_string(), overrun_color),
         qline(
             "recenter",
@@ -234,6 +271,7 @@ fn draw(
             format!("{} ms (adaptive)", stats.target_depth_ms),
             None,
         ),
+        qline("drift", format!("{drift:+.0} ms/min"), drift_color),
     ])
     .block(rounded("Quality"));
     frame.render_widget(quality, quality_a);

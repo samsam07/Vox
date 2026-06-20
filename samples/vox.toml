@@ -1,7 +1,10 @@
-# Example vox config. Every key has an identically-named CLI flag that OVERRIDES
-# it (precedence: flag > this file > built-in default). Run: `vox vox.toml`.
+# Annotated reference of EVERY vox config key. Each has an identically-named CLI flag
+# that OVERRIDES it (precedence: flag > this file > built-in default). Run: `vox vox.toml`.
 # This example is a full-duplex peer; edit `peer` and run a mirror on the other
 # machine pointing back at this one.
+#
+# For a concrete two-machine setup, see the scenario configs `host.toml` (Apollo
+# Windows host, VB-Cable A/B) and `client.toml` (real mic + headphones).
 
 # --- Connection ---
 peer = "192.168.1.50"   # send target, host[:port]. Port omitted -> 9680.

@@ -1,0 +1,21 @@
+# vox — Apollo/Moonlight HOST config (the Windows machine running the game stream).
+#
+# Captures desktop audio from VB-Cable A and plays the received client mic into
+# VB-Cable B, which apps on the host then see as a microphone — the missing mic
+# backchannel. Run:  vox host.toml
+#
+# Every key has an identically-named CLI flag that OVERRIDES it (flag > file > default).
+# Run `vox --list-devices` to get the exact device names for your system.
+
+# --- Connection ---
+peer = "192.168.1.20:9680"   # the CLIENT's address. ":9680" is the default port.
+bind = 9680                  # local UDP port the client sends back to.
+
+# --- Devices (exact names from `vox --list-devices`) ---
+capture  = "CABLE-A Output (VB-Audio Virtual Cable A)"   # desktop audio loopback
+playback = "CABLE-B Input (VB-Audio Virtual Cable B)"    # apps read B as a mic
+
+# --- Tuning (optional — these are the defaults; uncomment to change) ---
+# bitrate   = 24000          # Opus target bits/s (voice-grade)
+# jitter_ms = 150            # MAX buffer depth; vox adapts below it to the link
+# fec       = false          # enable only on a genuinely lossy link

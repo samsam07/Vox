@@ -26,9 +26,10 @@ and works as a general-purpose LAN voice pipe for anything else.
 Each instance runs four threads: a capture callback and a playback callback
 (audio I/O), plus a send thread (encode → UDP) and a receive thread (UDP →
 decode). A lock-free ring buffer hands audio off the real-time callbacks, and a
-small jitter buffer on the receive side smooths out network timing. Opus runs at
-48 kHz, 20 ms frames, mono; in-band FEC for graceful packet loss is part of the
-design and is enabled in Phase 2.
+jitter buffer on the receive side smooths out network timing and adapts its depth to
+the measured jitter. Opus runs at 48 kHz, 20 ms frames, mono; in-band FEC for
+graceful packet loss is available (opt-in via `--fec`, off by default — on a clean
+link it costs more than it saves).
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the full architecture and rationale.
 
@@ -85,11 +86,12 @@ Cross-compiling from Fedora is a later-phase convenience.
 
 ## Status
 
-Phase 1 MVP complete — usable daily for its purpose: full-duplex LAN voice with a
-clap CLI + TOML config and a live TUI. Phase 2 in progress: in-band FEC + graceful
-loss, reconnection robustness + jitter recentering, and non-48k device resampling
-are done; drift compensation / adaptive jitter and the Linux client come next, then
-packaging for third parties. See [`docs/PLAN.md`](docs/PLAN.md) for milestones.
+**Working beta (0.2.0).** Phase 1 MVP and most of Phase 2 are done: full-duplex LAN
+voice with a clap CLI + TOML config and a live TUI, plus in-band FEC + graceful loss,
+reconnection robustness, non-48k device resampling, and an adaptive jitter buffer —
+verified machine-to-machine. Remaining for Phase 2: smooth clock-drift compensation
+and the Linux client; Phase 3 covers packaging, encryption, and an Android front-end.
+Not a 1.0 release yet. See [`docs/PLAN.md`](docs/PLAN.md) for milestones.
 
 ## Scope
 

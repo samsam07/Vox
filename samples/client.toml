@@ -1,0 +1,19 @@
+# vox — Apollo/Moonlight CLIENT config (the machine you play from).
+#
+# Captures your real microphone and plays the received host audio to your
+# headphones. Both are the system default devices, so device names are usually
+# unnecessary. Run:  vox client.toml
+#
+# Every key has an identically-named CLI flag that OVERRIDES it (flag > file > default).
+
+# --- Connection ---
+peer = "192.168.1.10:9680"   # the HOST's address.
+bind = 9680                  # local UDP port the host sends back to.
+
+# --- Devices: omit to use the system defaults (real mic + headphones). ---
+# Uncomment and set exact names from `vox --list-devices` to pick specific devices.
+# capture  = "default"
+# playback = "default"
+
+# --- Tuning ---
+# jitter_ms = 150            # raise toward the ceiling on flaky WiFi for more slack

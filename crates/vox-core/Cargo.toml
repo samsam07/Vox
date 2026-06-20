@@ -1,6 +1,6 @@
 [package]
 name = "vox-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "vox engine: Opus codec + UDP transport + jitter buffer (platform-agnostic, no audio I/O)"
 license = "MIT OR Apache-2.0"

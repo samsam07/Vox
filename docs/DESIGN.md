@@ -50,8 +50,8 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
     concealment is never dropped). With the band sized to the jitter, normal swings
     free-run inside it without a (cutoff-causing) correction; only slow clock drift
     occasionally reaches an edge. Long-term drift is otherwise **not** smoothly
-    corrected — `[PHASE-3]` M13d (shelved resampling) is the seamless fix; the coarse
-    20 ms drop/hold is the accepted stopgap for the rare drift event.
+    corrected — M10b (shelved resampling) is the seamless fix; the coarse 20 ms
+    drop/hold is the accepted stopgap for the rare drift event.
 
 Single-owner discipline is enforced by the borrow checker. Do not defeat it with
 shared mutability.
@@ -107,8 +107,9 @@ UDP datagram = small header + Opus payload.
     too (M8 reconnection robustness). Transient socket errors from a peer being down
     (e.g. ICMP→ConnectionReset on Windows) are tolerated, not fatal, on both threads.
   - bytes 4..8: `timestamp` — u32, sample count of the frame's first sample
-    (increments by 960). Carried for Phase-2 clock-drift/playout work; the MVP
-    receiver does not consume it.
+    (increments by 960). The receiver reads it for adaptive jitter sizing (M10): the
+    timestamp delta gives the expected inter-arrival spacing that arrival-time jitter
+    is measured against (RFC3550), so a lost-packet gap is not mistaken for jitter.
   - bytes 8..: Opus payload (one encoded 20 ms mono frame).
 
 ## 6. CLI (locked)

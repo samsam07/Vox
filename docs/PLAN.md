@@ -104,7 +104,7 @@ Non-48k devices via a resampler (`rubato`). Lifts the 48k-only constraint.
 ### M10 — `[PHASE-2]` adaptive jitter — ✅ COMPLETE
 Originally drift compensation (resampling) + adaptive buffer sizing. The
 resampling-drift half was built (M10p1) and **shelved** (dropped; design preserved in
-M13d) after machine-to-machine testing: it taxed the common 48 kHz path without
+M10b) after machine-to-machine testing: it taxed the common 48 kHz path without
 reducing real-world recenter, because **jitter, not drift, dominates** on actual
 links. So M10 became **adaptive jitter sizing**: the receive thread measures arrival
 jitter (RFC3550, from the carried `timestamp`) and sizes a centre depth + band to it,
@@ -112,14 +112,35 @@ gliding the recenter watermarks (fast-attack / slow-release). `jitter-ms` is now
 depth ceiling (default 150 ms; adaptive below it).
 - Done: verified machine-to-machine — recenter fell from ~116/499 to ~3/8, audio
   clean. TUI shows live buffered latency + the adaptive `target`. The residual is
-  slow drift (buffer creeps high over a session) → M13d (Phase 3) is the seamless fix
-  and would also drop latency from ~ceiling to ~target.
+  slow drift (buffer creeps high over a session) → M10b is the seamless fix and would
+  also drop latency from ~ceiling to ~target.
 
 Phase-2 tuning that came out of M10 testing (smaller fixes, done ahead of M10
 proper): `fec` default reverted to **off** (it costs primary-signal quality + adds
 jitter; only helps on lossy links — see DESIGN §4); recenter watermarks widened to a
 near-rail/adaptive backstop so they stop cutting off on normal jitter; Windows timer
 resolution raised to 1 ms; TUI codec/config line.
+
+### M10b — smooth clock-drift compensation (promoted from Phase 3)
+The adaptive jitter buffer (M10) holds the band against jitter, but slow clock drift
+(peer capture clock vs local playback clock) still creeps the buffer toward a rail
+over a session, corrected only coarsely by the recenter drop/hold (the residual seen
+in M10 testing). The smooth fix: resample the receive stream at a ratio nudged by a
+control loop so the buffer holds its target with no discrete cutoffs — which also
+drops latency from ~ceiling back toward the target.
+
+Built once as M10p1 and shelved (it taxed the common 48 kHz path and didn't help
+jitter, which dominates). Revival plan: do **not** make it always-on — gate it
+(`--drift-correct`, default off) or auto-engage only once drift actually accumulates,
+keeping the 48 kHz passthrough otherwise; pair with M10 (jitter handled separately).
+Implementation that worked (reimplement from this):
+- Receive-side rubato `SincFixedIn::new(out/in ratio, max_relative = 1 + 2*MAX_TRIM,
+  params, chunk = 256, channels = 1)`; `params` = sinc_len 128 / f_cutoff 0.95 /
+  oversampling 256 / Linear / BlackmanHarris2. chunk 256 ≈ 5 ms added latency.
+- Per packet: `set_resample_ratio_relative(1.0 + trim, ramp = true)`, trim clamped to
+  ±MAX_TRIM = 0.005 (±0.5 %, ~8 cents — inaudible).
+- Proportional controller on EMA-smoothed occupancy: `smoothed += 0.05*(occ -
+  smoothed)`; `trim = -0.02*(smoothed - setpoint)/setpoint`; setpoint = capacity/2.
 
 ### M11 — Fedora native build + Linux client
 Bring up native Linux build (`alsa-lib-devel`); validate Windows↔Linux. Re-run the
@@ -133,38 +154,6 @@ M1 dual-stream smoke test on ALSA/PipeWire.
 ### M13 — packaging, logging/diagnostics, config validation, external-user docs.
 ### M13b — `[PHASE-3]` evaluate `opus-rs` to drop the libopus C dependency.
 ### M13c — `[PHASE-3]` adaptive FEC — auto-enable in-band FEC when the receiver reports real packet loss, so lossy links self-heal without the clean-link quality tax (FEC is opt-in/off by default as of Phase 2).
-### M13d — `[PHASE-3]` smooth drift compensation (resampling) — optional optimization
-Built once as M10p1 and shelved (net-negative on the common path); kept here because
-the *idea* is sound for drift-heavy long sessions. Long-term clock drift between the
-peer's capture clock and the local playback clock slowly fills/drains the jitter
-buffer; M8's recenter corrects it coarsely (a 20 ms frame drop/hold = an audible
-cutoff). The smooth fix: resample the receive stream at a ratio nudged by a control
-loop so the buffer holds its setpoint with no discrete jumps.
-
-Implementation that worked (reimplement from this if revived):
-- Receive-side resampler always active (even at 48 kHz, ratio ~1.0), via rubato
-  `SincFixedIn::new(out/in ratio, max_relative, params, chunk=256, channels=1)`,
-  `params` = sinc_len 128 / f_cutoff 0.95 / oversampling 256 / Linear /
-  BlackmanHarris2. `max_relative` must exceed 1+MAX_TRIM (rubato's relative bound is
-  `[1/max, max]`, so 1.005 rejects 0.995 — use `1 + 2*MAX_TRIM`). chunk 256 ≈ 5 ms
-  added latency.
-- Trim per received packet: `set_resample_ratio_relative(1.0 + trim, ramp=true)`,
-  trim clamped to ±MAX_TRIM = 0.005 (±0.5 %, ~8 cents — inaudible; tens-of-ppm drift
-  needs far less).
-- Controller = proportional on EMA-smoothed occupancy: `smoothed += ALPHA*(occ -
-  smoothed)` (ALPHA 0.05); `trim = -GAIN*(smoothed - setpoint)/setpoint` (GAIN 0.02);
-  setpoint = capacity/2. The EMA makes it track slow drift, not per-packet jitter.
-
-Why shelved (fix these before reviving):
-- It forces the receive path to ALWAYS resample, even at 48 kHz — losing M9's
-  passthrough and taxing the common path (~6 ms latency, sinc CPU, and chunking
-  lumpiness that *adds* occupancy variance, which can worsen recenter).
-- It only addresses DRIFT, but field testing showed JITTER dominates real links — so
-  it cost the common path without fixing the real problem (see the M10 reframe).
-- Revival fixes: don't make it always-on — gate it (`--drift-correct`, default off)
-  or auto-engage only when drift actually accumulates (keep the 48 kHz passthrough
-  otherwise); consider a fixed-output resampler to remove the chunking lumpiness; and
-  pair it with adaptive jitter (M10) so jitter is handled separately.
 ### M13e — `[PHASE-3]` cpal buffer-size tuning — possible jitter optimization
 Request a smaller fixed cpal buffer instead of `BufferSize::Default` (often ~10 ms),
 so the capture/playback callbacks deliver/consume audio in finer chunks → less
