@@ -86,7 +86,7 @@ Cross-compiling from Fedora is a later-phase convenience.
 
 ## Status
 
-**Working beta (0.2.0).** Phase 1 MVP and most of Phase 2 are done: full-duplex LAN
+**Working beta** (pre-1.0; no public release cut yet). Phase 1 MVP and most of Phase 2 are done: full-duplex LAN
 voice with a clap CLI + TOML config and a live TUI, plus in-band FEC + graceful loss,
 reconnection robustness, non-48k device resampling, and an adaptive jitter buffer —
 verified machine-to-machine. Remaining for Phase 2: smooth clock-drift compensation

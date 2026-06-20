@@ -43,3 +43,13 @@ live in CLAUDE.md, not here.
 - Add deliberately; prefer std. Pin sensible versions in `Cargo.toml`.
 - Verify a crate is maintained before adopting (the PortAudio-binding lesson:
   check last-release date and open-issue health, not just that it exists).
+
+## Versioning & releases
+- SemVer. The version stays at `0.1.0` until the first public release is cut — don't
+  bump ahead of a release (no phantom versions). Once releasing, bump the version on
+  every release-worthy change.
+- `vox` (CLI) and `vox-core` (engine) version independently: bump whichever crate
+  actually changed (bump `vox` when only the binary changed; bump both when a change
+  spans the engine and the CLI).
+- Each release is a git tag `vX.Y.Z` on the release commit, plus a GitHub release.
+  Tag only released versions — the tag and the `Cargo.toml` version must match.
