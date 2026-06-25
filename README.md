@@ -12,6 +12,11 @@ It was built to solve one specific gap: GPU desktop-streaming hosts like
 the host, but have no microphone backchannel. vox supplies that missing duplex —
 and works as a general-purpose LAN voice pipe for anything else.
 
+![vox live TUI dashboard](docs/Screenshot.png)
+
+*The live `--output tui` dashboard: device & peer status, throughput, the adaptive
+jitter buffer, and live loss / recenter / drift readouts.*
+
 ## Why
 
 - **Free & FOSS.** No paid tiers, no accounts.
