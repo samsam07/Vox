@@ -1,0 +1,2 @@
+- High fidelity audio
+- Auto quality adjust based on connection
