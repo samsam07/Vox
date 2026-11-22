@@ -9,8 +9,8 @@
 
 use anyhow::{anyhow, Result};
 use rubato::{
-    FftFixedIn, Resampler as _, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    FftFixedIn, Resampler as Rubato, SincFixedIn, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
 };
 
 /// Fixed input chunk fed to rubato per FFT (~21 ms at 48 kHz) — a latency/overhead
@@ -37,6 +37,8 @@ pub(crate) enum Resampler {
         inner: Box<FftFixedIn<f32>>,
         /// Input not yet consumed (rubato needs a full chunk to process).
         pending: Vec<f32>,
+        /// Reused per-chunk output buffer (so processing doesn't allocate).
+        scratch: Vec<Vec<f32>>,
     },
 }
 
@@ -49,6 +51,7 @@ impl Resampler {
         let inner = FftFixedIn::<f32>::new(in_rate as usize, out_rate as usize, CHUNK, 1, 1)
             .map_err(|e| anyhow!("create resampler {in_rate}->{out_rate} Hz: {e}"))?;
         Ok(Resampler::Convert {
+            scratch: inner.output_buffer_allocate(true),
             inner: Box::new(inner),
             pending: Vec::with_capacity(CHUNK * 2),
         })
@@ -60,20 +63,37 @@ impl Resampler {
     pub(crate) fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<()> {
         match self {
             Resampler::Passthrough => out.extend_from_slice(input),
-            Resampler::Convert { inner, pending } => {
+            Resampler::Convert {
+                inner,
+                pending,
+                scratch,
+            } => {
                 pending.extend_from_slice(input);
-                while pending.len() >= inner.input_frames_next() {
-                    let need = inner.input_frames_next();
-                    let resampled = inner
-                        .process(&[&pending[..need]], None)
-                        .map_err(|e| anyhow!("resample: {e}"))?;
-                    out.extend_from_slice(&resampled[0]);
-                    pending.drain(..need);
-                }
+                run_chunks(inner.as_mut(), pending, scratch, out)?;
             }
         }
         Ok(())
     }
+}
+
+/// Feed `pending` through `inner` one full input chunk at a time, appending the
+/// output to `out`. Uses the preallocated `scratch` (`process_into_buffer`) rather
+/// than rubato's `process`, which allocates a fresh output buffer per chunk.
+fn run_chunks<R: Rubato<f32>>(
+    inner: &mut R,
+    pending: &mut Vec<f32>,
+    scratch: &mut [Vec<f32>],
+    out: &mut Vec<f32>,
+) -> Result<()> {
+    while pending.len() >= inner.input_frames_next() {
+        let need = inner.input_frames_next();
+        let (used, written) = inner
+            .process_into_buffer(&[&pending[..need]], scratch, None)
+            .map_err(|e| anyhow!("resample: {e}"))?;
+        out.extend_from_slice(&scratch[0][..written]);
+        pending.drain(..used);
+    }
+    Ok(())
 }
 
 /// A receive-side resampler whose output rate can be nudged for smooth clock-drift
@@ -85,6 +105,8 @@ pub(crate) struct DriftResampler {
     // Boxed: `SincFixedIn` is large; off the audio callback, so the indirection is free.
     inner: Box<SincFixedIn<f32>>,
     pending: Vec<f32>,
+    /// Reused per-chunk output buffer, sized for the maximum trimmed ratio.
+    scratch: Vec<Vec<f32>>,
 }
 
 impl DriftResampler {
@@ -104,6 +126,7 @@ impl DriftResampler {
         let inner = SincFixedIn::<f32>::new(ratio, max_relative, params, DRIFT_CHUNK, 1)
             .map_err(|e| anyhow!("create drift resampler {in_rate}->{out_rate} Hz: {e}"))?;
         Ok(DriftResampler {
+            scratch: inner.output_buffer_allocate(true),
             inner: Box::new(inner),
             pending: Vec::with_capacity(DRIFT_CHUNK * 2),
         })
@@ -122,16 +145,12 @@ impl DriftResampler {
     /// Push mono `input`, appending resampled output to `out` (see [`Resampler::process`]).
     pub(crate) fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<()> {
         self.pending.extend_from_slice(input);
-        while self.pending.len() >= self.inner.input_frames_next() {
-            let need = self.inner.input_frames_next();
-            let resampled = self
-                .inner
-                .process(&[&self.pending[..need]], None)
-                .map_err(|e| anyhow!("drift resample: {e}"))?;
-            out.extend_from_slice(&resampled[0]);
-            self.pending.drain(..need);
-        }
-        Ok(())
+        run_chunks(
+            self.inner.as_mut(),
+            &mut self.pending,
+            &mut self.scratch,
+            out,
+        )
     }
 }
 

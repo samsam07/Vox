@@ -150,6 +150,24 @@ Implementation that worked (reimplement from this):
 - Proportional controller on EMA-smoothed occupancy: `smoothed += 0.05*(occ -
   smoothed)`; `trim = -0.02*(smoothed - setpoint)/setpoint`; setpoint = capacity/2.
 
+### M10c — underrun hardening — implemented, awaiting machine-to-machine check
+Reported "audio breaks sometimes". Diagnosis: without `--drift-correct`, nothing
+steers the buffer *up* toward the adaptive target — the low watermark was always
+one frame (centre − half-band is −5 ms at every jitter), so after any underrun the
+buffer limped along at ~20–40 ms and the next hiccup broke it again. On Linux it was
+worse: cpal's ALSA default period is 25 ms, larger than that one-frame floor. And
+nothing counted underruns, so the TUI couldn't show the actual break.
+- Done: playback-underrun and capture-overrun counters (plain + TUI); rebuffer to
+  the band centre after an underrun (and at startup, replacing the prefill), with
+  ~2 ms fades; band floored/shifted by the observed playback period; recenter
+  inserts suppressed while rebuffering; capture ring 50 → 200 ms. Loopback
+  integration test (`vox-core/tests/loopback.rs`) drives the real engine with
+  simulated 25 ms ALSA callbacks.
+- Exit: machine-to-machine session (Linux ↔ Windows) where `underrun` stays at or
+  near 0 on a clean link and each break, if any, is a single short dropout — not a
+  burst. If underruns still climb on WiFi, next levers: PLC on starvation (receive
+  thread conceals instead of the callback going silent), WiFi power-save off.
+
 ### M11 — Fedora native build + Linux client
 Bring up native Linux build (`alsa-lib-devel` + `opus-devel`); validate Windows↔Linux. Re-run the
 M1 dual-stream smoke test on ALSA/PipeWire.

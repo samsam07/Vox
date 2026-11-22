@@ -37,6 +37,12 @@ Nothing released yet — everything below is the content of the upcoming **0.1.0
   a dynamic-ratio resampler trimmed by a controller holds the buffer at its target,
   removing drift cutoffs and keeping latency near the target. A TUI **drift** readout
   (buffer-latency trend, ms/min) flags when to enable it.
+- **Underrun hardening** (M10c). Playback underruns and capture-ring overruns are
+  counted and shown (plain + TUI). After an underrun, playback fades out and
+  rebuffers to the adaptive target before fading back in, instead of resuming at
+  the floor and breaking again; the jitter band's floor now accounts for the
+  playback callback period (~25 ms on ALSA). The capture ring is deeper (200 ms) so
+  a stalled send thread no longer drops mic audio.
 - **Non-48 kHz device resampling** (`rubato`): a device that doesn't run at 48 kHz is
   opened at its native rate and resampled at the edge; the wire stays 48 kHz mono.
 - **Apollo / Sunshine integration**: runs until a stop signal so connect/disconnect

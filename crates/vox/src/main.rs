@@ -70,32 +70,31 @@ fn main() -> Result<()> {
         bail!("both capture and playback are 'none'; nothing to do");
     }
 
-    // Choose each device's operating rate (prefer 48 kHz, else native + resample),
-    // then negotiate channels at that rate. Disabled roles get a harmless default.
-    let capture_rate = match capture.as_ref() {
-        Some(device) => {
-            device::pick_sample_rate(device, Role::Capture, config.capture_sample_rate)?
-        }
-        None => device::RATE,
+    // Choose each device's operating rate (prefer 48 kHz, else native + resample)
+    // and channels (mono, else stereo) in one probe pass. Disabled roles get a
+    // harmless default rate and no channels.
+    let capture_stream = match capture.as_ref() {
+        Some(device) => Some(device::pick_stream(
+            device,
+            Role::Capture,
+            config.capture_sample_rate,
+            config.capture_channels,
+        )?),
+        None => None,
     };
-    let playback_rate = match playback.as_ref() {
-        Some(device) => {
-            device::pick_sample_rate(device, Role::Playback, config.playback_sample_rate)?
-        }
-        None => device::RATE,
+    let playback_stream = match playback.as_ref() {
+        Some(device) => Some(device::pick_stream(
+            device,
+            Role::Playback,
+            config.playback_sample_rate,
+            config.playback_channels,
+        )?),
+        None => None,
     };
-    let capture_channels = channels_for(
-        capture.as_ref(),
-        config.capture_channels,
-        Role::Capture,
-        capture_rate,
-    )?;
-    let playback_channels = channels_for(
-        playback.as_ref(),
-        config.playback_channels,
-        Role::Playback,
-        playback_rate,
-    )?;
+    let capture_rate = capture_stream.map_or(device::RATE, |(rate, _)| rate);
+    let capture_channels = capture_stream.map(|(_, channels)| channels);
+    let playback_rate = playback_stream.map_or(device::RATE, |(rate, _)| rate);
+    let playback_channels = playback_stream.map(|(_, channels)| channels);
 
     let peer = match (&capture, &config.peer) {
         (Some(_), Some(spec)) => Some(vox_core::parse_peer(&with_default_port(spec))?),
@@ -185,21 +184,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Forced channel count if given, else auto-negotiate at `rate`, else `None` (role
-/// disabled).
-fn channels_for(
-    device: Option<&Device>,
-    forced: Option<u16>,
-    role: Role,
-    rate: u32,
-) -> Result<Option<u16>> {
-    match (device, forced) {
-        (Some(_), Some(channels)) => Ok(Some(channels)),
-        (Some(device), None) => Ok(Some(device::pick_channels(device, role, rate)?)),
-        (None, _) => Ok(None),
-    }
-}
-
 fn with_default_port(spec: &str) -> String {
     if spec.contains(':') {
         spec.to_string()
@@ -233,17 +217,19 @@ fn log_summary(info: &SessionInfo) {
 
 fn report_final(output: OutputMode, sending: bool, receiving: bool, stats: &EngineStats) {
     let send = format!(
-        "sent {} packets ({} KiB)",
+        "sent {} packets ({} KiB), {} capture overruns",
         stats.packets_sent,
-        stats.bytes_sent / 1024
+        stats.bytes_sent / 1024,
+        stats.capture_overruns
     );
     let recv = format!(
-        "received {} packets ({} KiB), {} gap frames, {} late/dup, {} overruns, \
-         {} recenter (drop {} / hold {})",
+        "received {} packets ({} KiB), {} gap frames, {} late/dup, {} underruns, \
+         {} overruns, {} recenter (drop {} / hold {})",
         stats.packets_received,
         stats.bytes_received / 1024,
         stats.gap_frames,
         stats.dropped_late,
+        stats.underruns,
         stats.overruns,
         stats.recenter_drops + stats.recenter_inserts,
         stats.recenter_drops,
@@ -322,14 +308,17 @@ fn run_session(engine: &Engine, duration: Option<u64>) -> Result<()> {
         }
 
         info!(
-            "tx {:.0} kbps {:.0} pkt/s | rx {:.0} kbps {:.0} pkt/s | gaps {} drops {} overruns {} recenter {}/{}",
+            "tx {:.0} kbps {:.0} pkt/s | rx {:.0} kbps {:.0} pkt/s | gaps {} drops {} \
+             underruns {} overruns {} (capture {}) recenter {}/{}",
             kbps(now.bytes_sent - last.bytes_sent, secs),
             (now.packets_sent - last.packets_sent) as f64 / secs,
             kbps(now.bytes_received - last.bytes_received, secs),
             recv_delta as f64 / secs,
             now.gap_frames,
             now.dropped_late,
+            now.underruns,
             now.overruns,
+            now.capture_overruns,
             now.recenter_drops,
             now.recenter_inserts
         );

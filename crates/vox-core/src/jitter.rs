@@ -64,11 +64,17 @@ impl JitterEstimator {
 /// The recenter watermarks (low, high) in ring samples for a given smoothed jitter:
 /// hold below `low`, drop above `high`, free-run between. Centre and band both scale
 /// with jitter; clamped to leave one frame of headroom from each ring rail.
+///
+/// `period` is the playback callback's request size in ring samples (0 if not yet
+/// known). The callback drains the ring a period at a time — ~25 ms on ALSA — so the
+/// whole band sits a period higher: the low watermark (the underrun cushion) is then
+/// one frame + one period, not a bare frame that a single callback can empty (M10c).
 pub(crate) fn adaptive_watermarks(
     jitter_secs: f64,
     playback_rate: u32,
     channels: usize,
     capacity: usize,
+    period: usize,
 ) -> (usize, usize) {
     let jitter_ms = jitter_secs * 1000.0;
     let centre_ms = CENTRE_MIN_MS + CENTRE_PER_JITTER * jitter_ms;
@@ -78,15 +84,19 @@ pub(crate) fn adaptive_watermarks(
 
     // Leave a frame at each rail and a frame of band: low ≤ cap−2f, high ≤ cap−f.
     let low_max = capacity.saturating_sub(2 * frame).max(frame);
-    let low = (((centre_ms - half_band_ms).max(0.0) * per_ms) as usize).clamp(frame, low_max);
+    let low = ((((centre_ms - half_band_ms).max(0.0) * per_ms) as usize + period)
+        .max(frame + period))
+    .min(low_max);
     let high_max = capacity.saturating_sub(frame).max(low + frame);
-    let high = (((centre_ms + half_band_ms) * per_ms) as usize).clamp(low + frame, high_max);
+    let high =
+        (((centre_ms + half_band_ms) * per_ms) as usize + period).clamp(low + frame, high_max);
     (low, high)
 }
 
-/// The buffer depth to prefill / start at (the zero-jitter centre), in ring samples.
+/// The depth playback first fills to (the zero-jitter centre, period not yet known),
+/// in ring samples.
 pub(crate) fn initial_depth(playback_rate: u32, channels: usize, capacity: usize) -> usize {
-    let (low, high) = adaptive_watermarks(0.0, playback_rate, channels, capacity);
+    let (low, high) = adaptive_watermarks(0.0, playback_rate, channels, capacity, 0);
     (low + high) / 2
 }
 
@@ -155,8 +165,8 @@ mod tests {
     #[test]
     fn watermarks_grow_with_jitter_and_stay_in_bounds() {
         let cap = 48_000; // 1 s mono ring
-        let (lo0, hi0) = adaptive_watermarks(0.0, 48_000, MONO, cap);
-        let (lo1, hi1) = adaptive_watermarks(0.020, 48_000, MONO, cap); // 20 ms jitter
+        let (lo0, hi0) = adaptive_watermarks(0.0, 48_000, MONO, cap, 0);
+        let (lo1, hi1) = adaptive_watermarks(0.020, 48_000, MONO, cap, 0); // 20 ms jitter
 
         assert!(
             lo0 >= FRAME,
@@ -185,7 +195,18 @@ mod tests {
     #[test]
     fn watermarks_clamp_to_a_small_ring() {
         let cap = 3 * FRAME; // tiny ring
-        let (low, high) = adaptive_watermarks(0.050, 48_000, MONO, cap);
+        let (low, high) = adaptive_watermarks(0.050, 48_000, MONO, cap, 1200);
         assert!(low >= FRAME && high <= cap - FRAME && low < high);
+    }
+
+    #[test]
+    fn band_sits_a_playback_period_higher() {
+        let cap = 48_000;
+        let period = 1200; // a 25 ms ALSA callback, mono
+        let (lo0, hi0) = adaptive_watermarks(0.0, 48_000, MONO, cap, 0);
+        let (lo, hi) = adaptive_watermarks(0.0, 48_000, MONO, cap, period);
+        // The underrun cushion survives one full callback drain plus a frame.
+        assert_eq!(lo, FRAME + period);
+        assert_eq!((lo - lo0, hi - hi0), (period, period), "whole band shifts");
     }
 }

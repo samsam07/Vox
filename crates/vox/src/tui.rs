@@ -249,7 +249,8 @@ fn draw(
     } else {
         Color::Red
     };
-    let overrun_color = (stats.overruns > 0).then_some(Color::Red);
+    let overrun_color = (stats.overruns + stats.capture_overruns > 0).then_some(Color::Red);
+    let underrun_color = (stats.underruns > 0).then_some(Color::Red);
     let recenter = stats.recenter_drops + stats.recenter_inserts;
     let recenter_color = (recenter > 0).then_some(Color::Yellow);
     let drift_color = (drift.abs() >= 2.0).then_some(Color::Yellow);
@@ -258,7 +259,14 @@ fn draw(
         qline("gaps", stats.gap_frames.to_string(), None),
         // dropped_late = late/duplicate packets discarded (distinct from a recenter drop).
         qline("late", stats.dropped_late.to_string(), None),
-        qline("overrun", stats.overruns.to_string(), overrun_color),
+        // underrun = playback ran dry (one audible break each, then a rebuffer).
+        qline("underrun", stats.underruns.to_string(), underrun_color),
+        // overrun = jitter buffer full; capture = mic audio dropped (send fell behind).
+        qline(
+            "overrun",
+            format!("{}  (capture {})", stats.overruns, stats.capture_overruns),
+            overrun_color,
+        ),
         qline(
             "recenter",
             format!(

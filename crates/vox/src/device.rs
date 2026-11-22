@@ -132,45 +132,64 @@ pub fn stream_config(channels: u16, rate: u32) -> StreamConfig {
     }
 }
 
-/// Choose the device's operating rate: an explicit `forced` rate (must be
-/// supported); else 48 kHz when the device offers it (the no-resample fast path);
-/// else the device's native default rate (vox resamples to/from 48 kHz — M9).
-pub fn pick_sample_rate(device: &Device, role: Role, forced: Option<u32>) -> Result<u32> {
-    if let Some(rate) = forced {
-        if supports_rate(device, role, rate) {
-            return Ok(rate);
-        }
-        bail!("{} device does not support {} Hz", role.label(), rate);
+/// Choose the device's operating stream config, `(rate, channels)`:
+/// - rate: an explicit `forced` rate (must be supported); else 48 kHz when the device
+///   offers it (the no-resample fast path); else the device's native default rate
+///   (vox resamples to/from 48 kHz — M9).
+/// - channels: an explicit `forced` count; else mono if the device opens it at that
+///   rate, else stereo (DESIGN §4).
+///
+/// Each candidate config is probed once, in preference order — a mono 48 kHz device
+/// costs a single probe stream (probing is a real stream open, slow on ALSA).
+pub fn pick_stream(
+    device: &Device,
+    role: Role,
+    forced_rate: Option<u32>,
+    forced_channels: Option<u16>,
+) -> Result<(u32, u16)> {
+    let candidates = forced_channels.map_or_else(|| vec![1u16, 2], |c| vec![c]);
+    let probe = |rate: u32| {
+        candidates
+            .iter()
+            .copied()
+            .find(|&ch| can_build(device, role, ch, rate))
+            .map(|ch| (rate, ch))
+    };
+    let channels_label = match forced_channels {
+        Some(c) => format!("{c} ch"),
+        None => "mono or stereo".to_string(),
+    };
+
+    if let Some(rate) = forced_rate {
+        return probe(rate).ok_or_else(|| {
+            anyhow!(
+                "{} device does not support {} Hz ({})",
+                role.label(),
+                rate,
+                channels_label
+            )
+        });
     }
-    if supports_rate(device, role, RATE) {
-        return Ok(RATE);
+    if let Some(found) = probe(RATE) {
+        return Ok(found);
     }
-    let default = match role {
+    let native = match role {
         Role::Capture => device.default_input_config(),
         Role::Playback => device.default_output_config(),
     }
-    .map_err(|e| anyhow!("query default {} config: {e}", role.label()))?;
-    Ok(default.sample_rate().0)
-}
-
-/// Whether the device can open `rate` at f32 mono or stereo.
-fn supports_rate(device: &Device, role: Role, rate: u32) -> bool {
-    [1u16, 2]
-        .iter()
-        .any(|&ch| can_build(device, role, ch, rate))
-}
-
-/// Pick mono if the device can open it at `rate` / f32, else stereo (DESIGN §4).
-pub fn pick_channels(device: &Device, role: Role, rate: u32) -> Result<u16> {
-    for channels in [1u16, 2] {
-        if can_build(device, role, channels, rate) {
-            return Ok(channels);
+    .map_err(|e| anyhow!("query default {} config: {e}", role.label()))?
+    .sample_rate()
+    .0;
+    if native != RATE {
+        if let Some(found) = probe(native) {
+            return Ok(found);
         }
     }
     bail!(
-        "{} device offers no {} Hz f32 mono or stereo config",
+        "{} device offers no {} Hz f32 {} config",
         role.label(),
-        rate
+        native,
+        channels_label
     )
 }
 

@@ -8,8 +8,12 @@ pub(crate) const FRAME: usize = 960;
 /// Generous upper bound on one encoded 20 ms Opus packet, in bytes.
 pub(crate) const MAX_PACKET: usize = 4000;
 /// Capture ring depth (capture callback → send thread). Internal, not user-tunable
-/// — only the jitter buffer (`jitter_ms`) is exposed (DESIGN §6).
-pub(crate) const CAPTURE_RING_MS: u32 = 50;
+/// — only the jitter buffer (`jitter_ms`) is exposed (DESIGN §6). Headroom, not
+/// latency: the send thread drains it as fast as it fills, so depth only matters
+/// when that thread stalls (e.g. a loaded game host) — then a deeper ring keeps the
+/// mic audio instead of dropping it. ALSA delivers ~25 ms per callback, so the old
+/// 50 ms (two callbacks) overflowed on any stall over ~25 ms (M10c).
+pub(crate) const CAPTURE_RING_MS: u32 = 200;
 
 /// Ring capacity in samples for `ms` of audio at `rate`/`channels` (floored at one
 /// 48 kHz frame). `rate` is the device rate the ring carries, not necessarily 48 kHz.

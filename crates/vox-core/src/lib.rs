@@ -14,6 +14,7 @@ mod engine;
 mod jitter;
 mod net;
 pub mod packet;
+mod playout;
 mod receive;
 mod resample;
 mod send;

@@ -2,14 +2,15 @@
 //! the [`AudioPorts`] ring seam for a platform audio layer to drive (DESIGN §11).
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use crate::audio::{ring_capacity, CAPTURE_RING_MS};
+use crate::playout::{fade, relaxed, Playout};
 use crate::{net, receive, send};
 
 /// How to start an engine. `peer` is required to capture/send; `bind` is required
@@ -44,31 +45,66 @@ pub struct EngineConfig {
 /// This is the capture ring's producer end (one writer — DESIGN §3).
 pub struct CaptureSink {
     producer: HeapProd<f32>,
+    /// Callbacks whose audio didn't fit (send thread fell behind) — lost mic audio.
+    overruns: Arc<AtomicU64>,
 }
 
 impl CaptureSink {
     /// Push captured interleaved PCM. Non-blocking; a full ring drops the excess
-    /// (overrun). Safe to call from a real-time audio callback.
+    /// (overrun, counted). Safe to call from a real-time audio callback.
     pub fn push(&mut self, data: &[f32]) {
-        self.producer.push_slice(data);
+        if self.producer.push_slice(data) < data.len() {
+            self.overruns.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
-/// Non-blocking source: the platform's play callback pulls PCM to play from it,
-/// getting silence on underrun. This is the jitter buffer's consumer end (one
-/// reader — DESIGN §3).
+/// Non-blocking source: the platform's play callback pulls PCM to play from it.
+/// This is the jitter buffer's consumer end (one reader — DESIGN §3). On underrun
+/// it fades out and rebuffers to the adaptive target before resuming (M10c).
 pub struct PlaybackSource {
     consumer: HeapCons<f32>,
+    channels: usize,
+    playout: Arc<Playout>,
+    /// Callback-local mirrors of the shared fields this callback writes.
+    starved: bool,
+    period: usize,
 }
 
 impl PlaybackSource {
-    /// Fill `data` with interleaved PCM to play, padding with silence on underrun.
-    /// Non-blocking. Safe to call from a real-time audio callback.
+    /// Fill `data` with interleaved PCM to play. While rebuffering, or on underrun,
+    /// the remainder is silence (with a short fade at each edge). Non-blocking; only
+    /// ring ops and relaxed atomics. Safe to call from a real-time audio callback.
     pub fn fill(&mut self, data: &mut [f32]) {
-        let popped = self.consumer.pop_slice(data);
-        if popped < data.len() {
-            data[popped..].fill(0.0);
+        if data.len() > self.period {
+            self.period = data.len();
+            self.playout.period.store(self.period, Ordering::Relaxed);
         }
+        if self.starved {
+            // Resume only once the ring holds the target AND this whole request, so a
+            // resume never underruns inside the same callback.
+            let resume_at = relaxed(&self.playout.resume_at).max(data.len());
+            if self.consumer.occupied_len() < resume_at {
+                data.fill(0.0);
+                return;
+            }
+        }
+        let popped = self.consumer.pop_slice(data);
+        if self.starved {
+            fade(&mut data[..popped], self.channels, true);
+            self.set_starved(false);
+        }
+        if popped < data.len() {
+            fade(&mut data[..popped], self.channels, false);
+            data[popped..].fill(0.0);
+            self.set_starved(true);
+            self.playout.underruns.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn set_starved(&mut self, starved: bool) {
+        self.starved = starved;
+        self.playout.starved.store(starved, Ordering::Relaxed);
     }
 }
 
@@ -107,6 +143,12 @@ pub struct EngineStats {
     pub jitter_capacity: u64,
     /// Live buffered latency (occupancy) in ms.
     pub jitter_fill_ms: u64,
+    /// Cumulative playback underruns: each is one audible break, after which the
+    /// buffer rebuffers to the target (M10c).
+    pub underruns: u64,
+    /// Cumulative capture-ring overruns: callbacks whose mic audio was dropped because
+    /// the send thread fell behind.
+    pub capture_overruns: u64,
     /// Current adaptive target buffer depth, in ms (M10).
     pub target_depth_ms: u64,
 }
@@ -131,6 +173,7 @@ impl Engine {
                     channels,
                 ));
                 let (producer, consumer) = ring.split();
+                let overruns = Arc::new(AtomicU64::new(0));
                 let thread = send::spawn(
                     consumer,
                     Arc::clone(&socket),
@@ -143,8 +186,9 @@ impl Engine {
                         expected_loss: config.expected_loss,
                         dtx: config.dtx,
                     },
+                    Arc::clone(&overruns),
                 )?;
-                (Some(thread), Some(CaptureSink { producer }))
+                (Some(thread), Some(CaptureSink { producer, overruns }))
             }
             (Some(_), None) => bail!("a capture role requires a peer to send to"),
             (None, _) => (None, None),
@@ -155,16 +199,17 @@ impl Engine {
                 let capacity =
                     ring_capacity(config.playback_sample_rate, config.jitter_ms, channels);
                 let ring = HeapRb::<f32>::new(capacity);
-                let (mut producer, consumer) = ring.split();
-                // Prefill to the adaptive initial depth (the zero-jitter band centre)
-                // so playback starts smoothly and FEC gets its look-ahead (§4); M10's
-                // controller then resizes the band from there.
-                let prefill = crate::jitter::initial_depth(
+                let (producer, consumer) = ring.split();
+                // Playback starts starved: it stays silent until the ring fills to the
+                // adaptive initial depth (the zero-jitter band centre), so it starts
+                // smoothly and FEC gets its look-ahead (§4). The receive thread then
+                // moves that resume point with the band (M10, M10c).
+                let initial = crate::jitter::initial_depth(
                     config.playback_sample_rate,
                     channels as usize,
                     capacity,
                 );
-                producer.push_slice(&vec![0.0f32; prefill]);
+                let playout = Arc::new(Playout::new(initial));
                 let thread = receive::spawn(
                     producer,
                     Arc::clone(&socket),
@@ -172,8 +217,16 @@ impl Engine {
                     capacity,
                     config.playback_sample_rate,
                     config.drift_correct,
+                    Arc::clone(&playout),
                 )?;
-                (Some(thread), Some(PlaybackSource { consumer }))
+                let source = PlaybackSource {
+                    consumer,
+                    channels: channels as usize,
+                    playout,
+                    starved: true,
+                    period: 0,
+                };
+                (Some(thread), Some(source))
             }
             None => (None, None),
         };
@@ -199,6 +252,7 @@ impl Engine {
         if let Some(sender) = &self.sender {
             stats.packets_sent = sender.packets.load(Ordering::Relaxed);
             stats.bytes_sent = sender.bytes.load(Ordering::Relaxed);
+            stats.capture_overruns = sender.capture_overruns.load(Ordering::Relaxed);
         }
         if let Some(receiver) = &self.receiver {
             stats.packets_received = receiver.stats.received.load(Ordering::Relaxed);
@@ -212,6 +266,7 @@ impl Engine {
             stats.jitter_capacity = receiver.capacity as u64;
             stats.jitter_fill_ms = receiver.stats.jitter_fill_ms.load(Ordering::Relaxed);
             stats.target_depth_ms = receiver.stats.target_depth_ms.load(Ordering::Relaxed);
+            stats.underruns = receiver.playout.underruns.load(Ordering::Relaxed);
         }
         stats
     }
@@ -222,13 +277,17 @@ impl Engine {
         if let Some(sender) = self.sender {
             let packets = Arc::clone(&sender.packets);
             let bytes = Arc::clone(&sender.bytes);
+            let capture_overruns = Arc::clone(&sender.capture_overruns);
             sender.stop_and_join()?;
             stats.packets_sent = packets.load(Ordering::Relaxed);
             stats.bytes_sent = bytes.load(Ordering::Relaxed);
+            stats.capture_overruns = capture_overruns.load(Ordering::Relaxed);
         }
         if let Some(receiver) = self.receiver {
             let counters = Arc::clone(&receiver.stats);
+            let playout = Arc::clone(&receiver.playout);
             receiver.stop_and_join()?;
+            stats.underruns = playout.underruns.load(Ordering::Relaxed);
             stats.packets_received = counters.received.load(Ordering::Relaxed);
             stats.bytes_received = counters.bytes.load(Ordering::Relaxed);
             stats.gap_frames = counters.gap_frames.load(Ordering::Relaxed);
@@ -238,5 +297,100 @@ impl Engine {
             stats.recenter_inserts = counters.recenter_inserts.load(Ordering::Relaxed);
         }
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mono source over a ring of `capacity`, resuming at `resume_at` samples.
+    fn source(capacity: usize, resume_at: usize) -> (HeapProd<f32>, PlaybackSource) {
+        let (producer, consumer) = HeapRb::<f32>::new(capacity).split();
+        let source = PlaybackSource {
+            consumer,
+            channels: 1,
+            playout: Arc::new(Playout::new(resume_at)),
+            starved: true,
+            period: 0,
+        };
+        (producer, source)
+    }
+
+    fn underruns(source: &PlaybackSource) -> u64 {
+        source.playout.underruns.load(Ordering::Relaxed)
+    }
+
+    /// Startup: silent until the ring reaches the resume point, and the initially
+    /// empty ring is not counted as an underrun.
+    #[test]
+    fn starts_silent_until_target_then_fades_in() {
+        let (mut producer, mut src) = source(4096, 1000);
+        let mut out = vec![1.0f32; 256];
+
+        producer.push_slice(&vec![0.5f32; 900]); // below the resume point
+        src.fill(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "still rebuffering");
+        assert_eq!(underruns(&src), 0);
+
+        producer.push_slice(&vec![0.5f32; 200]); // now at/above it
+        src.fill(&mut out);
+        assert!(out[0] < 0.05, "resume edge is faded in, not a step");
+        assert_eq!(out[255], 0.5);
+        assert!(!src.playout.starved.load(Ordering::Relaxed));
+        assert_eq!(src.playout.period.load(Ordering::Relaxed), 256);
+    }
+
+    /// Running dry mid-callback: the tail fades out, the rest is silence, one underrun
+    /// is counted, and playback waits for the target again instead of trickling.
+    #[test]
+    fn underrun_counts_once_and_rebuffers() {
+        let (mut producer, mut src) = source(4096, 512);
+        let mut out = vec![0.0f32; 256];
+        producer.push_slice(&vec![0.5f32; 512 + 100]);
+        src.fill(&mut out); // resume, 356 left
+        src.fill(&mut out); // 100 left
+
+        src.fill(&mut out); // only 100 of 256 available → underrun
+        assert_eq!(underruns(&src), 1);
+        assert!(out[99] < 0.05, "tail faded out");
+        assert!(out[100..].iter().all(|&s| s == 0.0));
+
+        // Further starved callbacks don't re-count, and a trickle doesn't resume.
+        producer.push_slice(&vec![0.5f32; 300]);
+        src.fill(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(underruns(&src), 1);
+
+        producer.push_slice(&vec![0.5f32; 300]); // 600 ≥ 512 → resumes
+        src.fill(&mut out);
+        assert_eq!(out[255], 0.5);
+        assert_eq!(underruns(&src), 1);
+    }
+
+    /// A resume never starts a callback it can't finish, even when the target is
+    /// smaller than the request.
+    #[test]
+    fn resume_waits_for_a_full_request() {
+        let (mut producer, mut src) = source(4096, 10);
+        let mut out = vec![0.0f32; 256];
+        producer.push_slice(&vec![0.5f32; 100]); // ≥ target, < request
+        src.fill(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(underruns(&src), 0);
+    }
+
+    /// A full capture ring drops the excess and counts the overrun.
+    #[test]
+    fn capture_overrun_is_counted() {
+        let (producer, _consumer) = HeapRb::<f32>::new(100).split();
+        let mut sink = CaptureSink {
+            producer,
+            overruns: Arc::new(AtomicU64::new(0)),
+        };
+        sink.push(&[0.0; 80]);
+        assert_eq!(sink.overruns.load(Ordering::Relaxed), 0);
+        sink.push(&[0.0; 80]);
+        assert_eq!(sink.overruns.load(Ordering::Relaxed), 1);
     }
 }

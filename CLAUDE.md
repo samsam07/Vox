@@ -70,7 +70,8 @@ silently substituted for a specified name — do not repeat that class of bug.)
 
 - The audio callbacks are SACRED. Inside a cpal capture/playback callback: no
   allocation, no I/O, no syscalls, no contended locks, no encode/decode. Only a
-  non-blocking ring-buffer push/pop.
+  non-blocking ring-buffer push/pop, plus uncontended relaxed atomics (counters /
+  the M10c playout state) and fixed per-sample arithmetic (the underrun fade).
 - Buffers are SPSC: exactly one writer thread, one reader thread, each. Do not
   share a buffer three ways. Do not reach for `Arc<Mutex<>>` to dodge the borrow
   checker here — if it fights you, the design intent is a single-owner handoff.

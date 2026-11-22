@@ -22,6 +22,7 @@ use ringbuf::HeapProd;
 use crate::audio::{FRAME, MAX_PACKET};
 use crate::jitter::{adaptive_watermarks, ease, JitterEstimator};
 use crate::packet;
+use crate::playout::{relaxed, Playout};
 use crate::resample::ReceiveResampler;
 
 /// Frames of gap beyond which we assume a discontinuity (peer restart) and resync
@@ -92,6 +93,8 @@ pub(crate) struct ReceiveThread {
     pub(crate) stats: Arc<Stats>,
     /// Jitter-buffer capacity in samples (for reporting fill as a fraction).
     pub(crate) capacity: usize,
+    /// Shared with the [`crate::PlaybackSource`] (underruns, rebuffer state — M10c).
+    pub(crate) playout: Arc<Playout>,
 }
 
 impl ReceiveThread {
@@ -111,50 +114,43 @@ pub(crate) fn spawn(
     capacity: usize,
     playback_rate: u32,
     drift_correct: bool,
+    playout: Arc<Playout>,
 ) -> Result<ReceiveThread> {
     let decoder = opus::Decoder::new(crate::audio::RATE, opus::Channels::Mono)
         .context("create opus decoder")?;
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(Stats::default());
+    let receiver = Receiver::new(
+        decoder,
+        channels,
+        capacity,
+        playback_rate,
+        drift_correct,
+        Arc::clone(&playout),
+    )?;
     let thread = {
         let stop = Arc::clone(&stop);
         let stats = Arc::clone(&stats);
-        thread::spawn(move || {
-            recv_loop(
-                producer,
-                socket,
-                decoder,
-                channels,
-                capacity,
-                playback_rate,
-                drift_correct,
-                stop,
-                stats,
-            )
-        })
+        thread::spawn(move || recv_loop(producer, socket, receiver, stop, stats))
     };
     Ok(ReceiveThread {
         thread,
         stop,
         stats,
         capacity,
+        playout,
     })
 }
 
-#[allow(clippy::too_many_arguments)] // worker handoff; grouping would obscure, not clarify
 fn recv_loop(
     mut producer: HeapProd<f32>,
     socket: Arc<UdpSocket>,
-    decoder: opus::Decoder,
-    channels: usize,
-    capacity: usize,
-    playback_rate: u32,
-    drift_correct: bool,
+    mut receiver: Receiver,
     stop: Arc<AtomicBool>,
     stats: Arc<Stats>,
 ) -> Result<()> {
     let mut buf = vec![0u8; packet::HEADER_LEN + MAX_PACKET];
-    let mut receiver = Receiver::new(decoder, channels, capacity, playback_rate, drift_correct)?;
+    let per_ms = (receiver.playback_rate as u64 * receiver.channels as u64).max(1);
 
     while !stop.load(Ordering::Acquire) {
         let n = match socket.recv_from(&mut buf) {
@@ -190,7 +186,6 @@ fn recv_loop(
 
         let occupied = producer.occupied_len() as u64;
         stats.jitter_fill.store(occupied, Ordering::Relaxed);
-        let per_ms = (playback_rate as u64 * channels as u64).max(1);
         stats
             .jitter_fill_ms
             .store(occupied * 1000 / per_ms, Ordering::Relaxed);
@@ -227,6 +222,9 @@ struct Receiver {
     /// Playback rate and ring capacity, for recomputing the adaptive watermarks.
     playback_rate: u32,
     capacity: usize,
+    /// Playout state shared with the playback callback: its period floors the band,
+    /// its rebuffer state gates recenter inserts, and we publish its resume point.
+    playout: Arc<Playout>,
 }
 
 impl Receiver {
@@ -244,9 +242,11 @@ impl Receiver {
         capacity: usize,
         playback_rate: u32,
         drift_correct: bool,
+        playout: Arc<Playout>,
     ) -> Result<Self> {
+        let period = relaxed(&playout.period);
         let (low_watermark, high_watermark) =
-            adaptive_watermarks(0.0, playback_rate, channels, capacity);
+            adaptive_watermarks(0.0, playback_rate, channels, capacity, period);
         Ok(Receiver {
             decoder,
             channels,
@@ -261,6 +261,7 @@ impl Receiver {
             jitter: JitterEstimator::new(),
             playback_rate,
             capacity,
+            playout,
         })
     }
 
@@ -277,13 +278,21 @@ impl Receiver {
         stats: &Stats,
     ) -> Result<()> {
         let jitter = self.jitter.update(now, timestamp);
-        let (target_low, target_high) =
-            adaptive_watermarks(jitter, self.playback_rate, self.channels, self.capacity);
+        let (target_low, target_high) = adaptive_watermarks(
+            jitter,
+            self.playback_rate,
+            self.channels,
+            self.capacity,
+            relaxed(&self.playout.period),
+        );
         // Glide toward the target so the band doesn't jiggle per packet (fast to
         // deepen, slow to shrink).
         self.low_watermark = ease(self.low_watermark, target_low);
         self.high_watermark = ease(self.high_watermark, target_high);
         let centre = (self.low_watermark + self.high_watermark) / 2;
+        // A starved playback callback rebuffers to the band centre (M10c), so a break
+        // restores full jitter slack instead of resuming at the floor.
+        self.playout.resume_at.store(centre, Ordering::Relaxed);
         // Smooth drift correction (M10b): trim the resampler toward the band centre so
         // the buffer holds there instead of drifting to a rail (which would cut off).
         if let Some(drift) = &mut self.drift {
@@ -363,7 +372,11 @@ impl Receiver {
             return Ok(());
         }
         self.push(samples, producer, stats)?;
-        if producer.occupied_len() <= self.low_watermark {
+        // Not while playback is rebuffering: it is refilling on purpose, and a
+        // repeated frame would just play back as a stutter once it resumes (M10c).
+        if producer.occupied_len() <= self.low_watermark
+            && !self.playout.starved.load(Ordering::Relaxed)
+        {
             self.push(samples, producer, stats)?;
             stats.recenter_inserts.fetch_add(1, Ordering::Relaxed);
         }
@@ -418,9 +431,11 @@ impl Receiver {
 mod tests {
     use super::{DriftController, JitterEstimator, Receiver, Stats, MAX_GAP_FRAMES};
     use crate::audio::{FRAME, MAX_PACKET, RATE};
+    use crate::playout::Playout;
     use crate::resample::{ReceiveResampler, Resampler};
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use ringbuf::traits::{Consumer, Observer, Producer, Split};
     use ringbuf::HeapRb;
@@ -446,7 +461,16 @@ mod tests {
             jitter: JitterEstimator::new(),
             playback_rate: RATE,
             capacity: 0,
+            playout: playing(),
         }
+    }
+
+    /// Playout state for a callback that is playing (not rebuffering), so recenter
+    /// inserts are live.
+    fn playing() -> Arc<Playout> {
+        let playout = Playout::new(0);
+        playout.starved.store(false, Ordering::Relaxed);
+        Arc::new(playout)
     }
 
     /// `n` mono frames of a 440 Hz tone (something with structure for FEC/PLC to
@@ -649,6 +673,23 @@ mod tests {
         assert_eq!(stats.recenter_inserts.load(Ordering::Relaxed), 1);
         assert_eq!(stats.recenter_drops.load(Ordering::Relaxed), 0);
         assert_eq!(producer.occupied_len(), 2 * FRAME); // pushed once, then held once
+    }
+
+    /// While the playback callback rebuffers after an underrun, a low buffer is
+    /// refilling on purpose: no recenter insert (it would replay as a stutter).
+    #[test]
+    fn no_recenter_insert_while_rebuffering() {
+        let frames = encode(false, &sine_frames(1));
+        let (mut producer, _consumer) = HeapRb::<f32>::new(10 * FRAME).split();
+        let mut rx = make_receiver(1, usize::MAX, 2 * FRAME);
+        rx.playout.starved.store(true, Ordering::Relaxed);
+        let stats = Stats::default();
+
+        rx.accept(0, frames[0].as_slice(), &mut producer, &stats)
+            .unwrap();
+
+        assert_eq!(stats.recenter_inserts.load(Ordering::Relaxed), 0);
+        assert_eq!(producer.occupied_len(), FRAME);
     }
 
     /// In the mid-band, recentering stays idle — normal jitter lives here and must

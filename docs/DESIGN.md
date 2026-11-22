@@ -45,6 +45,22 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
   band to it — shallow (low latency) on a clean link, deeper (more slack) on a bursty
   one. So `jitter-ms` is a max, not a fixed depth; vox runs below it when it can.
   - Overrun → drop. Underrun → insert silence / Opus PLC frame.
+  - Underrun handling (M10c): the playback callback fades out (~2 ms, no click),
+    goes silent, and **rebuffers** — stays silent until the ring refills to the
+    adaptive band centre — before fading back in. A break so restores full jitter
+    slack instead of resuming at the floor and breaking again on the next hiccup.
+    Playback also starts this way (silent until the first fill reaches the target),
+    which replaces the startup prefill. Recenter inserts are suppressed while
+    rebuffering (a repeated frame would replay as a stutter).
+  - The band's low watermark (the underrun cushion) is one frame **plus one
+    playback-callback period**, and the whole band sits that period higher: the
+    callback drains the ring a period at a time (~25 ms on ALSA by default, ~10 ms
+    on WASAPI), so a bare one-frame floor could be emptied by a single callback.
+    The callback publishes its observed period for the receive thread to use.
+  - Underruns (playback) and capture-ring overruns (mic audio dropped because the
+    send thread fell behind) are counted and shown in the plain/TUI output. The
+    capture ring is 200 ms deep — headroom, not latency (the send thread drains it
+    as fast as it fills).
   - The recenter drop/hold (M8) is the band's edge enforcement: drop one in-order
     frame above the adaptive high watermark, repeat one below the low (loss
     concealment is never dropped). With the band sized to the jitter, normal swings
@@ -225,7 +241,8 @@ front-ends (e.g. an Android walkie-talkie) without dragging in the desktop CLI:
   plus the clap CLI, TOML config, and Apollo hooks.
 
 The seam is exactly §2/§3's ring boundary made public; the sacred-callback rule is
-unchanged (callbacks do only the non-blocking sink-push / source-pop).
+unchanged (callbacks do only the non-blocking sink-push / source-pop, plus the
+relaxed-atomic counters / playout state and the underrun fade — §3, M10c).
 
 `[PHASE-3]` an Android front-end is a second `vox-core` consumer: Oboe/AAudio (via
 JNI/uniffi) feeds the same sink/source, libopus builds via the NDK. Not pursued in

@@ -22,6 +22,8 @@ pub(crate) struct SendThread {
     stop: Arc<AtomicBool>,
     pub(crate) packets: Arc<AtomicU64>,
     pub(crate) bytes: Arc<AtomicU64>,
+    /// Shared with the [`crate::CaptureSink`], which increments it (M10c).
+    pub(crate) capture_overruns: Arc<AtomicU64>,
 }
 
 impl SendThread {
@@ -50,6 +52,7 @@ pub(crate) fn spawn(
     channels: usize,
     capture_rate: u32,
     params: EncoderParams,
+    capture_overruns: Arc<AtomicU64>,
 ) -> Result<SendThread> {
     // Resample the downmixed capture-rate mono up to the 48 kHz wire rate before
     // encode (a passthrough when the device already runs at 48 kHz) — DESIGN §4.
@@ -105,6 +108,7 @@ pub(crate) fn spawn(
         stop,
         packets,
         bytes,
+        capture_overruns,
     })
 }
 
