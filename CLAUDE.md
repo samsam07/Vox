@@ -20,9 +20,21 @@ relevant one when you start a slice — do not work from memory of it.
   + a C compiler to build bundled libopus (static). Linux: links system libopus
   via pkg-config (`opus-devel`); see DESIGN §8.
 - Transport: std UDP sockets. No RTP/RTCP.
-- Build: Cargo. No CMake/Meson of our own.
+- Build: Cargo. No CMake/Meson of our own. The top-level `Makefile` is only a thin
+  wrapper over `cargo` (see "Dev setup").
 - CLI: `clap`. Config: `toml` + `serde`.
 - Ring buffer: `ringbuf` or `rtrb` (SPSC lock-free).
+
+## Dev setup: build, install, run
+
+- **Topology:** vox runs on both ends — the Fedora (Linux) machine and the Windows
+  machine. Build natively on each (DESIGN §8).
+- `make test` — all tests. `make build` — `cargo build --release` →
+  `target/release/vox`.
+- **`make install`** (Linux) — builds, then **copies** vox to `~/.local/bin/vox`, the
+  `vox` on the owner's PATH. It is a copy, not a link: after a change the owner should
+  try for real, run `make install` (or tell the owner to), or the old build is what
+  runs.
 
 ## Judgment vs work boundary
 

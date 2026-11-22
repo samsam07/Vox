@@ -100,6 +100,10 @@ Then:
 cargo build --release
 ```
 
+On Linux, `make install` builds vox and copies it to `~/.local/bin/vox` (override
+with `make install BINDIR=<dir>`). The copy does not follow later builds — run
+`make install` again to update. `make test` runs all tests.
+
 On Linux the binary links the system libopus dynamically, so the machine running
 vox needs the `opus` runtime package (present on a stock Fedora desktop). On
 Windows libopus is built from source and linked statically — nothing extra at
