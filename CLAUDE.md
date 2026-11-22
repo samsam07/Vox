@@ -16,8 +16,9 @@ relevant one when you start a slice — do not work from memory of it.
 - Language: Rust (edition 2021+).
 - Audio I/O: `cpal` (maintained, callback-complete, pure-Rust). PortAudio was
   evaluated and dropped: its Rust binding is abandoned and callback-incomplete.
-- Codec: `opus` crate (libopus binding via `opusic-sys`). Needs `cmake` + a C
-  compiler to build bundled libopus.
+- Codec: `opus` crate (libopus binding via `audiopus_sys`). Windows: needs `cmake`
+  + a C compiler to build bundled libopus (static). Linux: links system libopus
+  via pkg-config (`opus-devel`); see DESIGN §8.
 - Transport: std UDP sockets. No RTP/RTCP.
 - Build: Cargo. No CMake/Meson of our own.
 - CLI: `clap`. Config: `toml` + `serde`.

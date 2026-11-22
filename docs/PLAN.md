@@ -151,7 +151,7 @@ Implementation that worked (reimplement from this):
   smoothed)`; `trim = -0.02*(smoothed - setpoint)/setpoint`; setpoint = capacity/2.
 
 ### M11 — Fedora native build + Linux client
-Bring up native Linux build (`alsa-lib-devel`); validate Windows↔Linux. Re-run the
+Bring up native Linux build (`alsa-lib-devel` + `opus-devel`); validate Windows↔Linux. Re-run the
 M1 dual-stream smoke test on ALSA/PipeWire.
 
 ---

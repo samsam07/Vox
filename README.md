@@ -86,12 +86,24 @@ resampler for no gain.
 
 ## Building
 
-Rust + Cargo. Requires a C compiler and `cmake` (to build bundled libopus); on
-Linux also `alsa-lib-devel`.
+Rust + Cargo. Requires a C compiler and `cmake` (to build bundled libopus).
+
+On Linux (Fedora) also install the ALSA and Opus development packages:
+
+```
+sudo dnf install alsa-lib-devel opus-devel
+```
+
+Then:
 
 ```
 cargo build --release
 ```
+
+On Linux the binary links the system libopus dynamically, so the machine running
+vox needs the `opus` runtime package (present on a stock Fedora desktop). On
+Windows libopus is built from source and linked statically — nothing extra at
+runtime. Bundling libopus into the Linux binary too is planned (see `TODO.md`).
 
 MVP builds natively per target (build Windows on Windows, Linux on Linux).
 Cross-compiling from Fedora is a later-phase convenience.

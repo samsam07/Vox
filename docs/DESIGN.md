@@ -175,8 +175,16 @@ applies when `fec` is on.
 
 ## 8. Build (locked)
 
-- Cargo only. cpal is pure-Rust (Linux needs `alsa-lib-devel`). Opus needs `cmake`
-  + a C compiler for bundled libopus.
+- Cargo only. cpal is pure-Rust (Linux needs `alsa-lib-devel`).
+- Opus (`opus` crate -> `audiopus_sys`):
+  - Windows: libopus built from source via `cmake` + a C compiler, linked
+    statically.
+  - Linux: system libopus found via pkg-config (`opus-devel`), linked
+    dynamically; runtime needs the `opus` package. `audiopus_sys` 0.2.2's bundled
+    path is broken on Fedora (asks for a dylib it does not build; searches
+    `out/lib` while cmake installs to `out/lib64`).
+  - `[PHASE-2]` bundle libopus into the Linux binary (static) so no system
+    Opus package is required.
 - Strategy A-then-B:
   - Phase 1: native build per target. Currently Windows→Windows (MSVC toolchain).
     Fedora native build comes at M11.

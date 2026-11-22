@@ -6,7 +6,8 @@ description = "vox engine: Opus codec + UDP transport + jitter buffer (platform-
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# Codec (bundled libopus; needs cmake + a C compiler).
+# Codec. Windows: bundled libopus (needs cmake + a C compiler). Linux: system
+# libopus via pkg-config (opus-devel). See docs/DESIGN.md §8.
 opus = "0.3"
 # SPSC lock-free ring buffer (capture ring + jitter buffer).
 ringbuf = "0.4"
