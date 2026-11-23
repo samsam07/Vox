@@ -35,6 +35,9 @@ relevant one when you start a slice — do not work from memory of it.
   `vox` on the owner's PATH. It is a copy, not a link: after a change the owner should
   try for real, run `make install` (or tell the owner to), or the old build is what
   runs.
+- **`make build-windows`** (on Linux) — cross-compiles
+  `target/x86_64-pc-windows-gnu/release/vox.exe` via MinGW (DESIGN §8). Copy that
+  exe to the Windows machine to run it. Native Windows builds still work too.
 
 ## Judgment vs work boundary
 

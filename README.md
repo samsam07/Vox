@@ -109,8 +109,19 @@ vox needs the `opus` runtime package (present on a stock Fedora desktop). On
 Windows libopus is built from source and linked statically — nothing extra at
 runtime. Bundling libopus into the Linux binary too is planned (see `TODO.md`).
 
-MVP builds natively per target (build Windows on Windows, Linux on Linux).
-Cross-compiling from Fedora is a later-phase convenience.
+Each platform can build natively (Windows on Windows, Linux on Linux). From
+Linux you can also cross-compile the Windows binary:
+
+```sh
+# one-time setup (Fedora)
+sudo dnf install mingw64-gcc mingw64-winpthreads-static cmake
+rustup target add x86_64-pc-windows-gnu
+
+make build-windows   # -> target/x86_64-pc-windows-gnu/release/vox.exe
+```
+
+The resulting `vox.exe` is standalone (libopus linked statically) — copy it to the
+Windows machine and run it.
 
 ## Status
 

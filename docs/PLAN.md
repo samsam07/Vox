@@ -176,7 +176,11 @@ M1 dual-stream smoke test on ALSA/PipeWire.
 
 ## Phase 3 — production for others
 
-### M12 — `cargo-zigbuild` cross-compile from Fedora (Linux→Windows).
+### M12 — cross-compile from Fedora (Linux→Windows)
+`make build-windows` → `target/x86_64-pc-windows-gnu/release/vox.exe` via MinGW-w64
+(DESIGN §8; replaced the original `cargo-zigbuild` plan).
+- Exit: the exe imports only Windows system DLLs (no `libopus`/`libgcc`/
+  `libwinpthread` DLLs) and runs a real session on the Windows machine.
 ### M13 — packaging, logging/diagnostics, config validation, external-user docs.
 ### M13b — `[PHASE-3]` evaluate `opus-rs` to drop the libopus C dependency.
 ### M13c — `[PHASE-3]` adaptive FEC — auto-enable in-band FEC when the receiver reports real packet loss, so lossy links self-heal without the clean-link quality tax (FEC is opt-in/off by default as of Phase 2).

@@ -202,10 +202,19 @@ applies when `fec` is on.
   - `[PHASE-2]` bundle libopus into the Linux binary (static) so no system
     Opus package is required.
 - Strategy A-then-B:
-  - Phase 1: native build per target. Currently Windows→Windows (MSVC toolchain).
-    Fedora native build comes at M11.
-  - `[PHASE-2/3]` cross-compile from Fedora via `cargo-zigbuild`, Linux→Windows
-    only (Windows→Linux is the hard direction, not pursued).
+  - A: native build per target — Windows→Windows (MSVC toolchain, cmake +
+    MSVC C compiler), Linux→Linux (M11).
+  - B (M12): cross-compile from Fedora, Linux→Windows only (Windows→Linux is the
+    hard direction, not pursued), via plain `cargo` + the MinGW-w64 toolchain
+    (`--target x86_64-pc-windows-gnu`, Fedora `mingw64-gcc`). `cargo-zigbuild`
+    was the original plan; dropped because system MinGW needs no extra tools and
+    zig can only target windows-gnu anyway, so the output is the same.
+    - The cross build forces `LIBOPUS_STATIC=1 LIBOPUS_NO_PKG=1`:
+      `audiopus_sys` chooses linkage by the *build host* (Linux → dynamic +
+      pkg-config), not the target. Set per-invocation (`make build-windows`),
+      never in `.cargo/config.toml`, so the native Linux build stays dynamic.
+    - The result is a standalone `vox.exe` (libopus static; only Windows system
+      DLLs). GNU ABI rather than MSVC — functionally equivalent for vox.
 - macOS deferred.
 
 ## 9. Data flow (one instance)
