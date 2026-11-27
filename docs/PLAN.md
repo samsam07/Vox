@@ -109,7 +109,8 @@ reducing real-world recenter, because **jitter, not drift, dominates** on actual
 links. So M10 became **adaptive jitter sizing**: the receive thread measures arrival
 jitter (RFC3550, from the carried `timestamp`) and sizes a centre depth + band to it,
 gliding the recenter watermarks (fast-attack / slow-release). `jitter-ms` is now the
-depth ceiling (default 150 ms; adaptive below it).
+depth ceiling (default 150 ms then; raised to 250 ms later — DESIGN §3 — because
+the 150 clamp pinned the band on busy networks; adaptive below it).
 - Done: verified machine-to-machine — recenter fell from ~116/499 to ~3/8, audio
   clean. TUI shows live buffered latency + the adaptive `target`. The residual is
   slow drift (buffer creeps high over a session) → M10b is the seamless fix and would

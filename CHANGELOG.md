@@ -32,7 +32,8 @@ Nothing released yet — everything below is the content of the upcoming **0.1.0
 - **Adaptive jitter buffer.** Sizes its operating band to measured network jitter
   (RFC3550, from the packet timestamp) — shallow / low-latency on clean links, deeper
   on bursty ones — with a recenter drop/hold backstop for slow clock drift.
-  `--jitter-ms` is the depth ceiling (default 150).
+  `--jitter-ms` is the depth ceiling (default 250; was 150, which capped the band
+  on busy networks so traffic bursts caused audible recenter drops).
 - **Smooth clock-drift compensation** (opt-in via `--drift-correct`, off by default):
   a dynamic-ratio resampler trimmed by a controller holds the buffer at its target,
   removing drift cutoffs and keeping latency near the target. A TUI **drift** readout

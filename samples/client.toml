@@ -16,4 +16,4 @@ bind = 9680                  # local UDP port the host sends back to.
 # playback = "default"
 
 # --- Tuning ---
-# jitter_ms = 150            # raise toward the ceiling on flaky WiFi for more slack
+# jitter_ms = 250            # raise toward the ceiling on flaky WiFi for more slack

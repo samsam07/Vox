@@ -101,7 +101,7 @@ pub struct Cli {
 
     // --- Receive-path ---
     /// Max jitter-buffer depth, ms (the ceiling; vox adapts the depth below it to
-    /// measured jitter — default 150).
+    /// measured jitter — default 250).
     #[arg(long = "jitter-ms")]
     pub jitter_ms: Option<u32>,
     /// Smooth clock-drift compensation (default off): resample to hold the buffer at

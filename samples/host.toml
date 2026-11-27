@@ -17,5 +17,5 @@ playback = "CABLE-B Input (VB-Audio Virtual Cable B)"    # apps read B as a mic
 
 # --- Tuning (optional — these are the defaults; uncomment to change) ---
 # bitrate   = 24000          # Opus target bits/s (voice-grade)
-# jitter_ms = 150            # MAX buffer depth; vox adapts below it to the link
+# jitter_ms = 250            # MAX buffer depth; vox adapts below it to the link
 # fec       = false          # enable only on a genuinely lossy link

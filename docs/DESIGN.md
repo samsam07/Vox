@@ -39,11 +39,17 @@ not run on the sacred callbacks, so they live on threads 3 and 4.
 - Capture ring: SPSC lock-free (`ringbuf`/`rtrb`). Writer = capture callback;
   reader = send thread.
 - Jitter buffer (receive side): writer = receive thread; reader = playback
-  callback. The ring is sized to `jitter-ms` (the depth **ceiling**, default 150 ms),
+  callback. The ring is sized to `jitter-ms` (the depth **ceiling**, default 250 ms),
   but the **operating depth is adaptive** (M10): the receive thread measures network
   jitter (RFC3550, from the carried packet `timestamp`) and sizes a centre depth +
   band to it — shallow (low latency) on a clean link, deeper (more slack) on a bursty
   one. So `jitter-ms` is a max, not a fixed depth; vox runs below it when it can.
+  - The ceiling defaults to 250 ms (was 150). The band's high watermark is clamped
+    to the ceiling minus a frame, and its natural size is ~85 ms + 6 × jitter (+ a
+    playback period). At 150 the clamp bit from ~3–6 ms of jitter, so busy-network
+    bursts hit the pinned high edge and recenter-dropped (audible breaks); 250 lets
+    the band follow jitter to ~20 ms. Clean-link latency is unchanged — the
+    operating depth comes from measured jitter, not the ceiling.
   - Overrun → drop. Underrun → insert silence / Opus PLC frame.
   - Underrun handling (M10c): the playback callback fades out (~2 ms, no click),
     goes silent, and **rebuffers** — stays silent until the ring refills to the
@@ -184,7 +190,7 @@ Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
 `*_sample_rate` auto (prefer 48 kHz when the device supports it, else its native
 rate + resample — M9), `*_channels` auto-negotiated (mono if the device supports it,
 else stereo), `bitrate` 24000,
-`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 150 (a ceiling; vox adapts
+`fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 250 (a ceiling; vox adapts
 below it). `fec` /
 `expected_loss` / `dtx` take effect on the encoder as of M7; `expected_loss` only
 applies when `fec` is on.
