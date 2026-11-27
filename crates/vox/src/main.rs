@@ -44,6 +44,7 @@ pub(crate) struct SessionInfo {
     pub bitrate: i32,
     pub jitter_ms: u32,
     pub fec: bool,
+    pub expected_loss: u8,
     pub dtx: bool,
     pub drift_correct: bool,
 }
@@ -144,6 +145,7 @@ fn main() -> Result<()> {
         bitrate: config.bitrate,
         jitter_ms: config.jitter_ms,
         fec: config.fec,
+        expected_loss: config.expected_loss,
         dtx: config.dtx,
         drift_correct: config.drift_correct,
     };

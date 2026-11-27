@@ -3,13 +3,14 @@
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use anyhow::{bail, Result};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use crate::audio::{ring_capacity, CAPTURE_RING_MS};
+use crate::control::{EngineControl, Tunable};
 use crate::playout::{fade, relaxed, Playout};
 use crate::{net, receive, send};
 
@@ -120,6 +121,8 @@ pub struct Engine {
     socket: Arc<UdpSocket>,
     sender: Option<send::SendThread>,
     receiver: Option<receive::ReceiveThread>,
+    /// Live-settings channel senders, one per running thread (DESIGN §12).
+    control: EngineControl,
 }
 
 /// Cumulative engine counters. Read live via [`Engine::stats`] or final via
@@ -174,21 +177,28 @@ impl Engine {
                 ));
                 let (producer, consumer) = ring.split();
                 let overruns = Arc::new(AtomicU64::new(0));
+                let (control_tx, controls) = mpsc::channel();
                 let thread = send::spawn(
                     consumer,
                     Arc::clone(&socket),
                     peer,
                     channels as usize,
                     config.capture_sample_rate,
-                    send::EncoderParams {
-                        bitrate: config.bitrate,
-                        fec: config.fec,
-                        expected_loss: config.expected_loss,
-                        dtx: config.dtx,
+                    Tunable {
+                        start: send::EncoderParams {
+                            bitrate: config.bitrate,
+                            fec: config.fec,
+                            expected_loss: config.expected_loss,
+                            dtx: config.dtx,
+                        },
+                        controls,
                     },
                     Arc::clone(&overruns),
                 )?;
-                (Some(thread), Some(CaptureSink { producer, overruns }))
+                (
+                    Some((thread, control_tx)),
+                    Some(CaptureSink { producer, overruns }),
+                )
             }
             (Some(_), None) => bail!("a capture role requires a peer to send to"),
             (None, _) => (None, None),
@@ -210,13 +220,17 @@ impl Engine {
                     capacity,
                 );
                 let playout = Arc::new(Playout::new(initial));
+                let (control_tx, controls) = mpsc::channel();
                 let thread = receive::spawn(
                     producer,
                     Arc::clone(&socket),
                     channels as usize,
                     capacity,
                     config.playback_sample_rate,
-                    config.drift_correct,
+                    Tunable {
+                        start: config.drift_correct,
+                        controls,
+                    },
                     Arc::clone(&playout),
                 )?;
                 let source = PlaybackSource {
@@ -226,16 +240,22 @@ impl Engine {
                     starved: true,
                     period: 0,
                 };
-                (Some(thread), Some(source))
+                (Some((thread, control_tx)), Some(source))
             }
             None => (None, None),
         };
 
+        let (sender, send_control) = sender.unzip();
+        let (receiver, receive_control) = receiver.unzip();
         Ok((
             Engine {
                 socket,
                 sender,
                 receiver,
+                control: EngineControl {
+                    send: send_control,
+                    receive: receive_control,
+                },
             },
             AudioPorts { capture, playback },
         ))
@@ -244,6 +264,12 @@ impl Engine {
     /// The bound local address (for diagnostics).
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+
+    /// A handle for changing settings live (DESIGN §12). Changes last for this
+    /// session only.
+    pub fn control(&self) -> EngineControl {
+        self.control.clone()
     }
 
     /// A live snapshot of the cumulative counters (non-consuming).

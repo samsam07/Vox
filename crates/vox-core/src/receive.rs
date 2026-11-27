@@ -16,10 +16,12 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+use log::{debug, warn};
 use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
 use crate::audio::{FRAME, MAX_PACKET};
+use crate::control::{ReceiveControls, Setting, Tunable};
 use crate::jitter::{adaptive_watermarks, ease, JitterEstimator};
 use crate::packet;
 use crate::playout::{relaxed, Playout};
@@ -113,9 +115,13 @@ pub(crate) fn spawn(
     channels: usize,
     capacity: usize,
     playback_rate: u32,
-    drift_correct: bool,
+    drift_correct: Tunable<bool>,
     playout: Arc<Playout>,
 ) -> Result<ReceiveThread> {
+    let Tunable {
+        start: drift_correct,
+        controls,
+    } = drift_correct;
     let decoder = opus::Decoder::new(crate::audio::RATE, opus::Channels::Mono)
         .context("create opus decoder")?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -131,7 +137,7 @@ pub(crate) fn spawn(
     let thread = {
         let stop = Arc::clone(&stop);
         let stats = Arc::clone(&stats);
-        thread::spawn(move || recv_loop(producer, socket, receiver, stop, stats))
+        thread::spawn(move || recv_loop(producer, socket, receiver, controls, stop, stats))
     };
     Ok(ReceiveThread {
         thread,
@@ -146,6 +152,7 @@ fn recv_loop(
     mut producer: HeapProd<f32>,
     socket: Arc<UdpSocket>,
     mut receiver: Receiver,
+    controls: ReceiveControls,
     stop: Arc<AtomicBool>,
     stats: Arc<Stats>,
 ) -> Result<()> {
@@ -153,6 +160,9 @@ fn recv_loop(
     let per_ms = (receiver.playback_rate as u64 * receiver.channels as u64).max(1);
 
     while !stop.load(Ordering::Acquire) {
+        // Once per pass (every datagram, and at least every read timeout): live
+        // changes land between frames (DESIGN §12).
+        receiver.drain_controls(&controls);
         let n = match socket.recv_from(&mut buf) {
             Ok((n, _from)) => n,
             // Transient: a read timeout, or — on Windows — a ConnectionReset that a
@@ -263,6 +273,38 @@ impl Receiver {
             capacity,
             playout,
         })
+    }
+
+    /// Drain queued live changes. A failed change is logged and the previous
+    /// setting kept: live tuning must never end the call.
+    fn drain_controls(&mut self, controls: &ReceiveControls) {
+        while let Ok(setting) = controls.try_recv() {
+            let result = match setting {
+                Setting::DriftCorrect(on) => self.set_drift_correct(on),
+                // Send-path settings are routed to the send thread; never queued here.
+                _ => Ok(()),
+            };
+            match result {
+                Ok(()) => debug!("receive path: applied {setting:?}"),
+                Err(e) => warn!("receive path: {e:#}; keeping the previous setting"),
+            }
+        }
+    }
+
+    /// Switch smooth drift correction on or off mid-call (DESIGN §12): rebuild the
+    /// resampler (`Static` ↔ `Drift`) and start the drift controller fresh (or drop
+    /// it). The decoder, sequence state and jitter estimate are untouched.
+    /// `[VERIFY]` the old resampler's buffered remainder (≤ one drift chunk, ~5 ms)
+    /// is discarded at the switch — possibly an audible click.
+    fn set_drift_correct(&mut self, on: bool) -> Result<()> {
+        if self.drift.is_some() == on {
+            return Ok(());
+        }
+        // Build first: on failure the current resampler and controller stay.
+        self.resampler = ReceiveResampler::new(crate::audio::RATE, self.playback_rate, on)
+            .context("rebuild receive resampler")?;
+        self.drift = on.then(DriftController::new);
+        Ok(())
     }
 
     /// Fold a packet arrival into the jitter estimate, resize the recenter band to it
@@ -431,6 +473,7 @@ impl Receiver {
 mod tests {
     use super::{DriftController, JitterEstimator, Receiver, Stats, MAX_GAP_FRAMES};
     use crate::audio::{FRAME, MAX_PACKET, RATE};
+    use crate::control::Setting;
     use crate::playout::Playout;
     use crate::resample::{ReceiveResampler, Resampler};
     use std::collections::HashSet;
@@ -530,6 +573,55 @@ mod tests {
 
     fn rms(frame: &[f32]) -> f32 {
         (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
+    }
+
+    /// Toggling drift correction mid-stream swaps the resampler and controller and
+    /// keeps the stream flowing; a repeat of the current state is a no-op.
+    #[test]
+    fn drift_correct_toggles_mid_stream() {
+        let frames = sine_frames(60);
+        let payloads = encode(false, &frames);
+        let capacity = 200 * FRAME;
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(capacity).split();
+        let mut receiver = make_receiver(1, usize::MAX, 0);
+        let stats = Stats::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut feed = |receiver: &mut Receiver, range: std::ops::Range<usize>| {
+            for i in range {
+                receiver
+                    .accept(i as u32, &payloads[i], &mut producer, &stats)
+                    .unwrap();
+            }
+        };
+
+        feed(&mut receiver, 0..20);
+        tx.send(Setting::DriftCorrect(true)).unwrap();
+        receiver.drain_controls(&rx);
+        assert!(matches!(receiver.resampler, ReceiveResampler::Drift(_)));
+        assert!(receiver.drift.is_some());
+
+        feed(&mut receiver, 20..40);
+        tx.send(Setting::DriftCorrect(true)).unwrap(); // already on: no rebuild
+        tx.send(Setting::DriftCorrect(false)).unwrap();
+        receiver.drain_controls(&rx);
+        assert!(matches!(receiver.resampler, ReceiveResampler::Static(_)));
+        assert!(receiver.drift.is_none());
+
+        feed(&mut receiver, 40..60);
+        let mut out = vec![0.0f32; consumer.occupied_len()];
+        consumer.pop_slice(&mut out);
+        // The drift resampler's chunking delays (and the swap discards) a few ms at
+        // most; the rest of the 60 frames arrives, finite and carrying the tone.
+        assert!(
+            out.len() >= 55 * FRAME,
+            "stream kept flowing: {} samples",
+            out.len()
+        );
+        assert!(out.iter().all(|s| s.is_finite()));
+        assert!(
+            rms(&out[out.len() - FRAME..]) > 0.2,
+            "tone after switching back"
+        );
     }
 
     /// Interior single-frame drops are each concealed by exactly one frame, so the

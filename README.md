@@ -15,7 +15,9 @@ and works as a general-purpose LAN voice pipe for anything else.
 ![vox live TUI dashboard](docs/Screenshot.png)
 
 *The live `--output tui` dashboard: device & peer status, throughput, the adaptive
-jitter buffer, and live loss / recenter / drift readouts.*
+jitter buffer, and live loss / recenter / drift readouts. Keys: `p` pause, `r` reset
+totals, `o` change bitrate / FEC / DTX / drift correction live (for this session
+only), `?` help.*
 
 ## Why
 
@@ -79,7 +81,8 @@ sample rate, etc.) lives in the TOML config and can be overridden by flags. See
 
 **Drift correction.** If the TUI's `drift` readout sits at a steady nonzero value
 (the jitter buffer slowly filling or draining over minutes — independent clocks on
-the two machines), enable `--drift-correct`: it smoothly holds the buffer at its
+the two machines), enable `--drift-correct` (or turn it on live from the TUI's `o`
+Options overlay to try it first): it smoothly holds the buffer at its
 target, removing the occasional clock-drift cutoff and keeping latency low. It's off
 by default because it only helps where drift exists — on a clean link it just adds a
 resampler for no gain.

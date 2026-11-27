@@ -173,6 +173,53 @@ nothing counted underruns, so the TUI couldn't show the actual break.
 Bring up native Linux build (`alsa-lib-devel` + `opus-devel`); validate Windows↔Linux. Re-run the
 M1 dual-stream smoke test on ALSA/PipeWire.
 
+### M16 — TUI redesign: "Pipeline" — implemented, awaiting machine-to-machine check
+Port the approved Pipeline design from the "vox TUI Workbench" artifact
+(https://claude.ai/artifact/VN5XtAXYfsUud9KSCWZakZ, preset 2) into
+`crates/vox/src/tui.rs`. The page's JS is the reference implementation. Panels
+follow the path the audio takes: header + health pill → Status (session only) →
+Throughput (btop graph + live box) → Jitter buffer (gauge, summary row, depth
+history) → Quality (six tiles) → footer key chips. Replaces the uncommitted Draft v1
+`tui.rs`; reuse what still fits (`History`, `BrailleGrid`, `nice_max`, `health()`).
+
+Decided (do not relitigate):
+- Graphs scroll btop-style: one 0.5 s sample per braille dot column, newest on the
+  right, never re-sampled. The history holds enough samples for the widest terminal
+  (1024); titles show the visible time span.
+- Quality = six 3-line tiles (loss, gaps, late, underrun, recenter, overrun): last
+  30 s value + total, green / yellow / red. Loss is red at ≥ 5 % in the last 30 s.
+- `p` freezes the display (vox keeps counting). `r` zeroes totals in the TUI by
+  subtracting a baseline `EngineStats` snapshot (no vox-core change).
+- `o` Options changes settings live via the control channel (DESIGN §12). `?` help.
+  Esc closes an open overlay before it quits.
+- Every TUI string is plain user language: no implementation detail (no "ring", no
+  config-file name, no flag names).
+
+Slices (each stops for review):
+- **M16a — docs.** DESIGN §12 (control channel) + this plan. Exit: owner approves.
+- **M16b — layout port, read-only.** Header + health pill, Status (session only),
+  Throughput with btop graph, divider and centred live box, Jitter buffer (gauge +
+  summary row + depth history), Quality tiles, footer chips, help overlay, `p` and
+  `r`. No vox-core changes. Exit: `make test` + clippy clean; render tests at 80×24,
+  120×30, 160×42, 197×46 (no panic, panels where expected, no text past its box);
+  an `#[ignore]`d `print_frame` test that prints a frame to compare with the
+  artifact's "Copy frame as text" for the same scenario.
+- **M16c — vox-core control channel.** `Engine` control handle, one `mpsc` per
+  thread, encoder ctls applied between frames, `drift_correct` resampler swap +
+  controller reset. Exit: unit tests show a queued change is applied before the next
+  frame is encoded, and the receiver switches `Static` ↔ `Drift` and keeps
+  producing audio; existing loopback test still passes. `[VERIFY]` the swap click
+  (DESIGN §12) by ear machine-to-machine.
+- **M16d — Options overlay.** Wire `o` to the control handle: ↑↓ select, ←→ change,
+  changed values highlighted; Status codec line follows; `expected_loss` greyed out
+  while `fec` is off; `jitter_ms` read-only. Exit: render tests for the overlay at
+  the four sizes; a TUI test that a key press sends the expected change.
+
+Done (M16a–d): all four built and tested (render tests at the four sizes, key
+tests, encoder/receiver control unit tests, a loopback test that changes bitrate and
+drift correction on a running engine). Open: the `[VERIFY]` resampler-swap click
+(DESIGN §12) by ear, Linux ↔ Windows.
+
 ---
 
 ## Phase 3 — production for others

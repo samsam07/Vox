@@ -21,8 +21,15 @@ Nothing released yet — everything below is the content of the upcoming **0.1.0
   Role-named device selection (`--capture` / `--playback`, each `none` | `default` |
   exact name); `--list-devices`, `--print-config`, `--duration`,
   `--output quiet|plain|tui`, `-v` / `-vv`.
-- **Live TUI dashboard** (`--output tui`): throughput graph, jitter-buffer gauge with
-  live latency, and loss / recenter / drift quality readouts.
+- **Live TUI dashboard** (`--output tui`), laid out along the audio path: session
+  status, a btop-style scrolling tx/rx throughput graph with live rates, the jitter
+  buffer (gauge with adaptive target, fill / headroom / drift, depth history with
+  recenter and underrun marks), six Quality tiles (last 30 s + totals) and a health
+  verdict. Keys: `p` pause, `r` reset totals, `o` options, `?` help.
+- **Live settings** (`vox-core`: `Engine::control()` → `EngineControl`): change
+  `bitrate`, `fec`, `expected_loss`, `dtx` and `drift_correct` mid-call, from the
+  TUI's Options overlay. Applied between frames by the thread that owns each codec;
+  session-only (never written to the config). `jitter_ms` still needs a restart.
 - **In-band FEC + PLC loss concealment** (opt-in via `--fec`, off by default — on a
   clean link it costs more than it saves). The receiver reconstructs a lost frame
   from the redundant copy carried in the next packet; earlier losses use PLC.

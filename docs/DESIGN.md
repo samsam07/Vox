@@ -183,7 +183,8 @@ stop signal).
 
 Keys mirror flags using role naming: `peer`, `bind`, `capture`, `playback`,
 `capture_sample_rate`, `playback_sample_rate`, `capture_channels`,
-`playback_channels`, `bitrate`, `fec`, `expected_loss`, `dtx`, `jitter_ms`.
+`playback_channels`, `bitrate`, `fec`, `expected_loss`, `dtx`, `jitter_ms`,
+`drift_correct`.
 Precedence: flag > TOML > default. See `samples/vox.toml`.
 
 Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
@@ -191,7 +192,7 @@ Defaults: `bind` 9680 (when receiving), `capture`/`playback` `default`,
 rate + resample — M9), `*_channels` auto-negotiated (mono if the device supports it,
 else stereo), `bitrate` 24000,
 `fec` false, `expected_loss` 10, `dtx` false, `jitter_ms` 250 (a ceiling; vox adapts
-below it). `fec` /
+below it), `drift_correct` false (M10b, §3). `fec` /
 `expected_loss` / `dtx` take effect on the encoder as of M7; `expected_loss` only
 applies when `fec` is on.
 
@@ -262,3 +263,45 @@ relaxed-atomic counters / playout state and the underrun fade — §3, M10c).
 `[PHASE-3]` an Android front-end is a second `vox-core` consumer: Oboe/AAudio (via
 JNI/uniffi) feeds the same sink/source, libopus builds via the NDK. Not pursued in
 Phase 1 — the split only keeps it possible without re-architecting later.
+
+## 12. Live settings: the TUI control channel (decided for the TUI redesign, M16)
+
+The TUI's Options overlay changes some audio settings while a call is running, so
+they can be tuned while watching loss/drift on the dashboard instead of restarting
+both ends (which breaks the call). Live: `bitrate`, `fec`, `expected_loss`, `dtx`
+(send path) and `drift_correct` (receive path). `jitter_ms` stays start-only — the
+jitter ring is allocated to it (§3) — and the TUI shows it read-only ("needs
+restart").
+
+- **Shape.** `Engine` hands the front-end a control handle (`Engine::control()` →
+  `EngineControl`; a change is a `Setting`). Changes travel over one
+  `std::sync::mpsc` channel per thread: one to the send thread, one to the receive
+  thread. A direction that isn't running has no channel; the handle offers only the
+  settings of the roles that exist (`EngineControl::apply` refuses the others).
+- **Send thread.** Drains its channel with `try_recv` once per loop pass, at the top
+  of the pass, so changes land *between* frames, never mid-encode. It applies them
+  with the Opus encoder ctls: `set_bitrate`, `set_inband_fec`,
+  `set_packet_loss_perc`, `set_dtx`. Same rule as at start-up (§7): the packet-loss
+  percentage is `expected_loss` while `fec` is on and 0 while it is off, so changing
+  `expected_loss` with `fec` off only takes effect once `fec` is turned on.
+- **Receive thread.** Drains its channel once per loop pass (every datagram, and at
+  least every socket read timeout, so a silent peer doesn't stall it). Toggling
+  `drift_correct` rebuilds its `ReceiveResampler` (`Static` ↔ `Drift`) and resets
+  the drift controller (a fresh `DriftController` when on, none when off). The
+  decoder, sequence state, and jitter estimate are untouched.
+  - `[VERIFY]` the swap discards the old resampler's buffered remainder (up to one
+    256-sample drift chunk, ~5 ms) and the new one starts with its own delay, so a
+    few samples drop or shift at the switch — possibly an audible click. Check by ear
+    machine-to-machine; if it is audible, a mitigation is a separate decision.
+- **Errors.** A ctl or rebuild that fails is logged and the thread keeps running with
+  its previous setting — a live-tuning mistake must never end the call.
+- **The peer needs nothing.** Nothing goes on the wire (§5 unchanged): the peer's
+  Opus decoder accepts whatever bitrate / FEC / DTX arrives, and `drift_correct` is
+  purely local.
+- **Session-only.** Changes are never written to the config file; a restart uses the
+  configured values (§7 precedence).
+- **Invariants unchanged.** The audio callbacks are untouched (§2, §11). Each codec
+  and resampler is still owned and mutated by its one thread — the control handle
+  only sends messages, never touches codec state (§2, §4). The SPSC rings stay
+  exactly two-ended (§3); the control channels connect the front-end to our own
+  threads only, never to a callback.

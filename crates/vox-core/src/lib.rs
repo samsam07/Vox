@@ -10,6 +10,7 @@
 //! mono / upmix happen inside the engine; the platform only supplies channel counts.
 
 mod audio;
+mod control;
 mod engine;
 mod jitter;
 mod net;
@@ -19,5 +20,6 @@ mod receive;
 mod resample;
 mod send;
 
+pub use control::{EngineControl, Setting};
 pub use engine::{AudioPorts, CaptureSink, Engine, EngineConfig, EngineStats, PlaybackSource};
 pub use net::parse_peer;
